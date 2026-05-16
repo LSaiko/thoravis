@@ -15,7 +15,7 @@ Usage
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 from typing import Optional, Tuple, List
 from src.preprocessing import XRayPreprocessor
@@ -62,13 +62,15 @@ class ChestXrayDataset(Dataset):
     ----------
     hf_split    : HuggingFace dataset split ('train' / 'test')
     preprocessor: XRayPreprocessor instance
-    subset_size : cap on number of samples (None = use all)
+    indices     : explicit list of dataset indices to use (takes priority over subset_size)
+    subset_size : cap on number of samples from index 0 (None = use all)
     """
 
     def __init__(
         self,
         hf_split: str = "train",
         preprocessor: Optional[XRayPreprocessor] = None,
+        indices: Optional[List[int]] = None,
         subset_size: Optional[int] = None,
     ):
         print(f"Loading NIH ChestX-ray14 [{hf_split}] from HuggingFace Hub...")
@@ -79,8 +81,9 @@ class ChestXrayDataset(Dataset):
             trust_remote_code=True,
         )
 
-        if subset_size is not None:
-            # Stratify by whether a finding is present to keep class balance
+        if indices is not None:
+            self.ds = self.ds.select(indices)
+        elif subset_size is not None:
             self.ds = self.ds.select(range(min(subset_size, len(self.ds))))
 
         self.preprocessor = preprocessor or XRayPreprocessor()
@@ -163,15 +166,22 @@ def get_dataloaders(
     train_preprocessor = XRayPreprocessor(augment=True)
     val_preprocessor   = XRayPreprocessor(augment=False)
 
+    if n_train is not None:
+        train_indices = list(range(0, n_train))
+        val_indices   = list(range(n_train, n_train + n_val))
+    else:
+        train_indices = None
+        val_indices   = None
+
     train_ds = ChestXrayDataset(
         hf_split="train",
         preprocessor=train_preprocessor,
-        subset_size=n_train,
+        indices=train_indices,
     )
     val_ds = ChestXrayDataset(
         hf_split="train",
         preprocessor=val_preprocessor,
-        subset_size=(n_train + n_val) if n_val else None,
+        indices=val_indices,
     )
     test_ds = ChestXrayDataset(
         hf_split="test",

@@ -1,7 +1,7 @@
 # 🫁 ThoraVis — Thoracic Pathology Classifier
 
 > **Multi-label chest X-ray classification using PyTorch + HuggingFace Transformers + OpenCV preprocessing**  
-> Applied to the NIH ChestX-ray14 dataset (112,120 frontal-view images, 14 pathology labels)
+> Applied to the NIH ChestX-ray14 dataset (112,120 frontal-view images, 15 label classes)
 
 ---
 
@@ -19,7 +19,7 @@
 - Loads and explores the **NIH ChestX-ray14** dataset via HuggingFace Datasets
 - Applies clinical-grade **OpenCV preprocessing** (CLAHE enhancement, lung-field normalization, adaptive thresholding)
 - Fine-tunes a **ViT-B/16** (Vision Transformer) backbone from HuggingFace for multi-label classification
-- Adds a **PyTorch Lightning** training loop with AUC-ROC tracking per pathology
+- Implements a custom **PyTorch** training loop with AUC-ROC tracking per pathology
 - Exports **Grad-CAM heatmaps** (OpenCV overlay) to visualize model attention on X-ray findings
 - Achieves competitive **AUC ≥ 0.80** on high-prevalence pathologies (Effusion, Atelectasis, Cardiomegaly)
 
@@ -66,10 +66,10 @@ thoravis/
 | HuggingFace Hub | [`alkzar90/NIH-Chest-X-ray-dataset`](https://huggingface.co/datasets/alkzar90/NIH-Chest-X-ray-dataset) |
 | Images | 112,120 frontal-view PNGs (1024×1024) |
 | Patients | 30,805 unique |
-| Labels | 14 pathologies (multi-label) |
+| Labels | 15 label classes: 14 diseases + `No Finding` (multi-label) |
 | License | No restrictions (NIH attribution required) |
 
-**14 Pathology Classes:**
+**15 Label Classes (14 diseases + No Finding):**
 `No Finding` · `Atelectasis` · `Cardiomegaly` · `Effusion` · `Infiltration` · `Mass` · `Nodule` · `Pneumonia` · `Pneumothorax` · `Consolidation` · `Edema` · `Emphysema` · `Fibrosis` · `Pleural Thickening` · `Hernia`
 
 ---
@@ -92,14 +92,14 @@ Raw X-ray PNG (1024×1024)
         │
         ▼
 [Custom PyTorch Classification Head]
-  └─ Linear(768 → 256) → GELU → Dropout(0.3) → Linear(256 → 14)
+  └─ Linear(768 → 256) → GELU → Dropout(0.3) → Linear(256 → 15)
         │
         ▼
 [Multi-label BCEWithLogitsLoss]
   └─ Weighted by inverse class frequency
         │
         ▼
-[Output: 14-dim sigmoid probabilities]
+[Output: 15-dim sigmoid probabilities]
 ```
 
 ---
@@ -109,7 +109,7 @@ Raw X-ray PNG (1024×1024)
 ### 1. Install Dependencies
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/thoravis.git
+git clone https://github.com/LSaiko/thoravis.git
 cd thoravis
 pip install -r requirements.txt
 ```
@@ -190,12 +190,13 @@ transformers>=4.38.0
 datasets>=2.18.0
 opencv-python>=4.9.0
 numpy>=1.26.0
-pandas>=2.2.0
 scikit-learn>=1.4.0
 matplotlib>=3.8.0
 tqdm>=4.66.0
+accelerate>=0.27.0
 Pillow>=10.2.0
 jupyter>=1.0.0
+ipywidgets>=8.1.0
 ```
 
 ---

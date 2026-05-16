@@ -11,7 +11,7 @@ Architecture
             └── Linear(768 → 256)
                 └── GELU
                     └── Dropout(0.3)
-                        └── Linear(256 → 14)   ← raw logits per pathology
+                        └── Linear(256 → 15)   ← raw logits per pathology
 """
 
 import torch
@@ -32,7 +32,7 @@ class ThoraVisClassifier(nn.Module):
 
     Parameters
     ----------
-    num_classes    : number of output labels (14 for NIH ChestX-ray14)
+    num_classes    : number of output labels (15 for NIH ChestX-ray14: 14 diseases + No Finding)
     pretrained_ckpt: HuggingFace model ID
     dropout        : dropout rate in classification head
     freeze_backbone: freeze ViT weights for first N steps (warm-up)
@@ -106,6 +106,7 @@ class ThoraVisClassifier(nn.Module):
 
     def predict_proba(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Sigmoid-activated probabilities for each class."""
+        self.eval()
         with torch.no_grad():
             logits = self.forward(pixel_values)
         return torch.sigmoid(logits)

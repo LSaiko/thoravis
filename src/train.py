@@ -97,10 +97,15 @@ class ThoraVisTrainer:
             lr=lr,
             weight_decay=1e-2,
         )
+        cosine_steps = max(1, epochs - warmup_epochs)
         self.scheduler = CosineAnnealingLR(
-            self.optimizer, T_max=epochs - warmup_epochs, eta_min=1e-7
+            self.optimizer, T_max=cosine_steps, eta_min=1e-7
         )
-        self.criterion = WeightedBCELoss()
+
+        # Compute class weights from training data and pass to loss
+        print("\n── Computing class weights ───────────────────────────────────")
+        class_weights = self.train_loader.dataset.class_weights().to(self.device)
+        self.criterion = WeightedBCELoss(class_weights=class_weights)
 
         # History
         self.history = {

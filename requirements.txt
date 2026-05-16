@@ -11,14 +11,12 @@ Pillow>=10.2.0
 
 # Data Science
 numpy>=1.26.0
-pandas>=2.2.0
 scikit-learn>=1.4.0
 matplotlib>=3.8.0
-scipy>=1.12.0
 
 # Training utilities
 tqdm>=4.66.0
-accelerate>=0.27.0
+accelerate>=0.27.0  # used internally by HuggingFace datasets for fast loading
 
 # Notebook
 jupyter>=1.0.0
