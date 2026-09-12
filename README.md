@@ -5,6 +5,7 @@
 
 ---
 
+![Tests](https://github.com/LSaiko/thoravis/actions/workflows/tests.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch)
 ![HuggingFace](https://img.shields.io/badge/🤗-Transformers-yellow)
@@ -39,21 +40,29 @@ This project was built to concretely demonstrate:
 thoravis/
 ├── README.md
 ├── requirements.txt
+├── .github/workflows/
+│   └── tests.yml        ← CI: installs deps, runs tests/ on every push/PR
 ├── notebooks/
 │   └── 01_thoravis_full_pipeline.ipynb   ← Main Jupyter showcase notebook
 ├── src/
-│   ├── dataset.py       ← HuggingFace + PyTorch Dataset wrapper
+│   ├── dataset.py       ← HuggingFace + PyTorch Dataset wrapper, global seeding
 │   ├── preprocessing.py ← OpenCV clinical preprocessing pipeline
 │   ├── model.py         ← ViT fine-tuning with custom classification head
 │   ├── train.py         ← Training loop, AUC tracking, checkpointing
+│   ├── predict.py       ← Single-image inference CLI
 │   ├── evaluate.py      ← Per-pathology AUC-ROC, confusion matrices
 │   └── gradcam.py       ← Grad-CAM heatmap generation with OpenCV overlay
+├── tests/
+│   ├── test_preprocessing.py
+│   ├── test_model.py
+│   ├── test_predict.py
+│   └── test_dataset.py
 ├── models/
 │   └── .gitkeep
 ├── results/
 │   └── .gitkeep
 └── assets/
-    └── pipeline_diagram.png
+    └── .gitkeep
 ```
 
 ---
@@ -137,6 +146,25 @@ python src/train.py --subset 5000 --epochs 5 --batch_size 32
 python src/train.py --epochs 20 --batch_size 64 --lr 2e-5
 ```
 
+### 4. Run Inference on a Single Image
+
+```bash
+python src/predict.py --image path/to/xray.png --checkpoint models/best_thoravis.pt
+```
+
+Prints a sigmoid probability for each of the 15 pathology labels, marking the
+ones at or above `--threshold` (default 0.5).
+
+### 5. Run Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Covers preprocessing output shapes, the classifier's forward pass (against a tiny
+ViT checkpoint, not the full ViT-B/16), and label-vector / class-weight construction
+in `ChestXrayDataset` — no GPU or full dataset download required.
+
 ---
 
 ## 📊 Results (Subset: 5,000 images, 5 epochs)
@@ -187,7 +215,7 @@ X-rays have extreme dynamic range. CLAHE (Contrast Limited Adaptive Histogram Eq
 torch>=2.1.0
 torchvision>=0.16.0
 transformers>=4.38.0
-datasets>=2.18.0
+datasets>=2.18.0,<4.0.0
 opencv-python>=4.9.0
 numpy>=1.26.0
 scikit-learn>=1.4.0

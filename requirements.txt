@@ -3,7 +3,8 @@
 torch>=2.1.0
 torchvision>=0.16.0
 transformers>=4.38.0
-datasets>=2.18.0
+datasets>=2.18.0,<4.0.0  # 4.0 dropped script-based dataset support; this project's
+                         # HF dataset (alkzar90/NIH-Chest-X-ray-dataset) still uses one
 
 # Computer Vision
 opencv-python>=4.9.0

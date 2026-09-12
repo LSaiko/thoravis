@@ -13,6 +13,7 @@ Usage
     )
 """
 
+import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -126,6 +127,26 @@ class ChestXrayDataset(Dataset):
         return weights
 
 
+# ─── Reproducibility ──────────────────────────────────────────────────────────
+
+def set_global_seed(seed: int) -> None:
+    """Seed python/numpy/torch RNGs so a run is reproducible end to end."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _worker_init_fn(worker_id: int) -> None:
+    """Re-seed numpy/random per DataLoader worker (each forks with the same
+    numpy RNG state otherwise, so RandomHorizontalFlip/ColorJitter etc. would
+    repeat identically across workers)."""
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
+
+
 # ─── DataLoader factory ───────────────────────────────────────────────────────
 
 def get_dataloaders(
@@ -152,6 +173,8 @@ def get_dataloaders(
     -------
     train_loader, val_loader, test_loader
     """
+    set_global_seed(seed)
+
     total = subset_size
 
     # Split sizes
@@ -198,6 +221,7 @@ def get_dataloaders(
         num_workers=num_workers,
         pin_memory=True,
         generator=g,
+        worker_init_fn=_worker_init_fn,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -206,6 +230,7 @@ def get_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        worker_init_fn=_worker_init_fn,
     )
     test_loader = DataLoader(
         test_ds,
@@ -213,6 +238,7 @@ def get_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        worker_init_fn=_worker_init_fn,
     )
 
     return train_loader, val_loader, test_loader

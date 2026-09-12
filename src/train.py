@@ -23,7 +23,7 @@ from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 from typing import Optional
 
-from src.dataset import get_dataloaders, PATHOLOGY_LABELS, NUM_CLASSES
+from src.dataset import get_dataloaders, set_global_seed, PATHOLOGY_LABELS, NUM_CLASSES
 from src.model import ThoraVisClassifier, WeightedBCELoss
 
 
@@ -53,6 +53,7 @@ class ThoraVisTrainer:
         warmup_epochs: int = 1,
         checkpoint_dir: str = "models",
         device: Optional[str] = None,
+        seed: int = 42,
     ):
         self.subset_size    = subset_size
         self.epochs         = epochs
@@ -60,7 +61,12 @@ class ThoraVisTrainer:
         self.lr             = lr
         self.warmup_epochs  = warmup_epochs
         self.checkpoint_dir = checkpoint_dir
+        self.seed           = seed
         os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Seed before any data loading or model init so the whole run is
+        # reproducible, not just the DataLoader's own shuffle order.
+        set_global_seed(seed)
 
         # Auto-detect device
         if device:
@@ -78,6 +84,7 @@ class ThoraVisTrainer:
         self.train_loader, self.val_loader, self.test_loader = get_dataloaders(
             subset_size=subset_size,
             batch_size=batch_size,
+            seed=seed,
         )
 
         # Model (start with frozen backbone for warmup)
@@ -253,6 +260,7 @@ def main():
     parser.add_argument("--lr",         type=float, default=2e-5)
     parser.add_argument("--warmup",     type=int,   default=1)
     parser.add_argument("--device",     type=str,   default=None)
+    parser.add_argument("--seed",       type=int,   default=42)
     args = parser.parse_args()
 
     trainer = ThoraVisTrainer(
@@ -262,6 +270,7 @@ def main():
         lr=args.lr,
         warmup_epochs=args.warmup,
         device=args.device,
+        seed=args.seed,
     )
     trainer.train()
     trainer.print_per_class_auc()
