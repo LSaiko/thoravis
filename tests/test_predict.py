@@ -10,7 +10,7 @@ from PIL import Image
 
 from src.dataset import NUM_CLASSES, PATHOLOGY_LABELS
 from src.model import ThoraVisClassifier
-from src.predict import load_model, predict_image
+from src.predict import load_model, predict_image, predict_image_with_uncertainty
 from tests._helpers import make_tiny_vit_checkpoint
 
 
@@ -44,6 +44,17 @@ class TestPredictImage(unittest.TestCase):
         probs = predict_image(self.model, self.image_path, torch.device("cpu"))
         self.assertEqual(set(probs.keys()), set(PATHOLOGY_LABELS))
         self.assertTrue(all(0.0 <= p <= 1.0 for p in probs.values()))
+
+    def test_uncertainty_returns_mean_and_std_per_pathology(self):
+        results = predict_image_with_uncertainty(
+            self.model, self.image_path, torch.device("cpu"), n_samples=10
+        )
+        self.assertEqual(set(results.keys()), set(PATHOLOGY_LABELS))
+        for stats in results.values():
+            self.assertIn("mean", stats)
+            self.assertIn("std", stats)
+            self.assertTrue(0.0 <= stats["mean"] <= 1.0)
+            self.assertGreaterEqual(stats["std"], 0.0)
 
 
 if __name__ == "__main__":

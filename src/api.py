@@ -85,15 +85,29 @@ def health():
 
 
 @app.post("/predict")
-def predict(file: UploadFile = File(...), threshold: float = Query(0.5, ge=0.0, le=1.0)):
+def predict(
+    file: UploadFile = File(...),
+    threshold: float = Query(0.5, ge=0.0, le=1.0),
+    n_samples: int = Query(1, ge=1, le=100, description="MC dropout samples; >1 adds per-label uncertainty"),
+):
     pil_img = _read_image(file)
     image_tensor = state["preprocessor"].preprocess_pil(pil_img).unsqueeze(0).to(state["device"])
 
-    probs = state["model"].predict_proba(image_tensor)[0]
-    predictions = {label: float(p) for label, p in zip(PATHOLOGY_LABELS, probs)}
+    if n_samples > 1:
+        mean, std = state["model"].predict_with_uncertainty(image_tensor, n_samples=n_samples)
+        predictions = {label: float(m) for label, m in zip(PATHOLOGY_LABELS, mean[0])}
+        uncertainty = {label: float(s) for label, s in zip(PATHOLOGY_LABELS, std[0])}
+    else:
+        probs = state["model"].predict_proba(image_tensor)[0]
+        predictions = {label: float(p) for label, p in zip(PATHOLOGY_LABELS, probs)}
+        uncertainty = None
+
     above_threshold = {k: v for k, v in predictions.items() if v >= threshold}
 
-    return {"predictions": predictions, "above_threshold": above_threshold, "threshold": threshold}
+    response = {"predictions": predictions, "above_threshold": above_threshold, "threshold": threshold}
+    if uncertainty is not None:
+        response["uncertainty"] = uncertainty
+    return response
 
 
 @app.post("/predict/gradcam")

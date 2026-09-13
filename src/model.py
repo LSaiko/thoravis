@@ -17,7 +17,7 @@ Architecture
 import torch
 import torch.nn as nn
 from transformers import ViTModel, ViTConfig
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from src.dataset import NUM_CLASSES, PATHOLOGY_LABELS
 
 
@@ -110,6 +110,33 @@ class ThoraVisClassifier(nn.Module):
         with torch.no_grad():
             logits = self.forward(pixel_values)
         return torch.sigmoid(logits)
+
+    def predict_with_uncertainty(
+        self,
+        pixel_values: torch.Tensor,
+        n_samples: int = 20,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Monte Carlo dropout (Gal & Ghahramani, 2016): run `n_samples`
+        stochastic forward passes with dropout active — both the
+        classification head's Dropout(0.3) and the ViT backbone's internal
+        dropout — and return (mean, std) probability per class.
+
+        A high std flags a prediction the model is architecturally unsure
+        about (dropout perturbs it a lot), independent of how confident the
+        single-pass probability looks — a candidate for human review rather
+        than trusting one point estimate.
+        """
+        self.train()  # activate dropout for MC sampling
+        with torch.no_grad():
+            samples = torch.stack([
+                torch.sigmoid(self.forward(pixel_values)) for _ in range(n_samples)
+            ])
+        self.eval()
+        # unbiased=False (population std): with n_samples=1 the default
+        # (Bessel-corrected) estimator divides by zero and returns NaN
+        # instead of the sane "one sample can't disagree with itself" 0.
+        return samples.mean(dim=0), samples.std(dim=0, unbiased=False)
 
     def predict_dict(
         self,

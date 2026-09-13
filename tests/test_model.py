@@ -46,6 +46,29 @@ class TestThoraVisClassifier(unittest.TestCase):
         out = self.model.predict_dict(self._random_batch(1), threshold=1.1)
         self.assertEqual(out, [{}])
 
+    def test_predict_with_uncertainty_shapes_and_bounds(self):
+        mean, std = self.model.predict_with_uncertainty(self._random_batch(2), n_samples=10)
+        self.assertEqual(tuple(mean.shape), (2, NUM_CLASSES))
+        self.assertEqual(tuple(std.shape), (2, NUM_CLASSES))
+        self.assertTrue(torch.all(mean >= 0) and torch.all(mean <= 1))
+        self.assertTrue(torch.all(std >= 0))
+
+    def test_predict_with_uncertainty_sets_eval_mode(self):
+        self.model.predict_with_uncertainty(self._random_batch(1), n_samples=5)
+        self.assertFalse(self.model.training)
+
+    def test_predict_with_uncertainty_single_sample_has_zero_std(self):
+        # Degenerate but correct: one MC sample can't disagree with itself.
+        _, std = self.model.predict_with_uncertainty(self._random_batch(1), n_samples=1)
+        self.assertTrue(torch.all(std == 0))
+
+    def test_predict_with_uncertainty_dropout_produces_real_variance(self):
+        # The classification head's Dropout(0.3) should make repeated
+        # samples disagree — a std of exactly zero here would mean MC
+        # dropout silently isn't perturbing anything.
+        _, std = self.model.predict_with_uncertainty(self._random_batch(4), n_samples=25)
+        self.assertTrue(torch.any(std > 0.01))
+
     def test_count_parameters_totals_are_consistent(self):
         info = self.model.count_parameters()
         self.assertEqual(info["trainable"] + info["frozen"], info["total"])

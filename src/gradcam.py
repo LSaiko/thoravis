@@ -24,7 +24,10 @@ from src.preprocessing import overlay_heatmap
 
 class GradCAMViT:
     """
-    Grad-CAM for ViT models (hooks into the last transformer encoder layer).
+    Grad-CAM for ViT models — hooks the second-to-last transformer block by
+    default (see _last_vit_layer's docstring for why not the last one: with
+    a CLS-token-only head, the last layer's own patch outputs have zero
+    gradient w.r.t. the logit, not just a small one).
 
     For ViT the attention tokens have shape (B, num_patches+1, hidden).
     We reshape the gradient-weighted token features back to a 2D spatial map.
@@ -32,20 +35,20 @@ class GradCAMViT:
     Parameters
     ----------
     model       : ThoraVisClassifier instance
-    layer_name  : dot-path to target layer (default: last encoder layer)
     device      : torch.device
+    layer_index : which transformer block to hook (default -2)
     """
 
     def __init__(
         self,
         model,
         device: Optional[torch.device] = None,
+        layer_index: int = -2,
     ):
         self.model  = model
         self.device = device or next(model.parameters()).device
 
-        # Target: last ViT encoder layer's output
-        self._target_layer = self._last_vit_layer(model.backbone)
+        self._target_layer = self._last_vit_layer(model.backbone, layer_index)
 
         self._gradients   = None
         self._activations = None
@@ -53,19 +56,31 @@ class GradCAMViT:
         self._register_hooks()
 
     @staticmethod
-    def _last_vit_layer(backbone):
+    def _last_vit_layer(backbone, layer_index: int = -2):
         """
-        Locate the last transformer block on a HuggingFace ViTModel.
+        Locate a transformer block on a HuggingFace ViTModel, by default the
+        SECOND-TO-LAST one (index -2) — not the last one.
 
-        transformers restructured this between versions: older releases
-        nest blocks under `backbone.encoder.layer`, current ones (5.x)
-        expose `backbone.layers` directly on the model. Support both so
-        Grad-CAM doesn't silently break on a transformers upgrade.
+        With a CLS-token-only classification head (this model reads only
+        last_hidden_state[:, 0, :]), the final layer's own *patch*-token
+        outputs have zero gradient w.r.t. the logit: ViTModel's final
+        LayerNorm operates per-token, so it can't mix patch information
+        into the CLS position — there is no computational path from the
+        loss back to those specific activations at all, not just a small
+        one. (Confirmed empirically: layer -1 gives an all-zero CAM on
+        every input; layer -2's patch outputs still feed into the last
+        layer's self-attention as keys/values, which does reach the CLS
+        output, and gives a real, varying CAM.)
+
+        transformers also restructured this between versions: older
+        releases nest blocks under `backbone.encoder.layer`, current ones
+        (5.x) expose `backbone.layers` directly on the model. Support both
+        so Grad-CAM doesn't silently break on a transformers upgrade.
         """
         if hasattr(backbone, "encoder") and hasattr(backbone.encoder, "layer"):
-            return backbone.encoder.layer[-1]
+            return backbone.encoder.layer[layer_index]
         if hasattr(backbone, "layers"):
-            return backbone.layers[-1]
+            return backbone.layers[layer_index]
         raise AttributeError(
             "Could not locate ViT transformer blocks on this backbone "
             "(expected .encoder.layer or .layers)"

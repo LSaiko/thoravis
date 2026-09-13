@@ -3,6 +3,8 @@
 > **Multi-label chest X-ray classification using PyTorch + HuggingFace Transformers + OpenCV preprocessing**  
 > Applied to the NIH ChestX-ray14 dataset (112,120 frontal-view images, 15 label classes)
 
+**→ Read [MODEL_CARD.md](MODEL_CARD.md) before using this for anything beyond the portfolio/research use case it was built for.**
+
 ---
 
 ![Tests](https://github.com/LSaiko/thoravis/actions/workflows/tests.yml/badge.svg)
@@ -40,6 +42,8 @@ This project was built to concretely demonstrate:
 thoravis/
 ├── README.md
 ├── requirements.txt
+├── requirements-api.txt ← Serving-only deps for Docker (no jupyter/matplotlib)
+├── MODEL_CARD.md        ← Read before using this beyond the portfolio use case
 ├── Dockerfile           ← CPU inference image (see "Run via Docker")
 ├── .dockerignore
 ├── .github/workflows/
@@ -49,13 +53,14 @@ thoravis/
 ├── src/
 │   ├── dataset.py       ← HuggingFace + PyTorch Dataset wrapper, global seeding
 │   ├── preprocessing.py ← OpenCV clinical preprocessing pipeline
-│   ├── model.py         ← ViT fine-tuning with custom classification head
+│   ├── model.py         ← ViT fine-tuning, MC-dropout uncertainty
 │   ├── train.py         ← Training loop, AUC tracking, checkpointing
 │   ├── predict.py       ← Single-image inference CLI
 │   ├── api.py           ← FastAPI inference service (/predict, /predict/gradcam)
 │   ├── export.py        ← TorchScript export CLI
-│   ├── evaluate.py      ← Per-pathology AUC-ROC, calibration, confusion matrices
-│   └── gradcam.py       ← Grad-CAM heatmap generation with OpenCV overlay
+│   ├── evaluate.py      ← Per-pathology AUC-ROC, calibration
+│   ├── gradcam.py       ← Grad-CAM heatmap generation with OpenCV overlay
+│   └── bbox_eval.py     ← Grad-CAM vs. radiologist bounding boxes
 ├── tests/
 │   ├── test_preprocessing.py
 │   ├── test_model.py
@@ -63,6 +68,7 @@ thoravis/
 │   ├── test_api.py
 │   ├── test_export.py
 │   ├── test_gradcam.py
+│   ├── test_bbox_eval.py
 │   ├── test_train.py
 │   ├── test_evaluate.py
 │   └── test_dataset.py
@@ -165,7 +171,10 @@ python -m src.predict --image path/to/xray.png --checkpoint models/best_thoravis
 ```
 
 Prints a sigmoid probability for each of the 15 pathology labels, marking the
-ones at or above `--threshold` (default 0.5).
+ones at or above `--threshold` (default 0.5). Add `--uncertainty 20` to run
+20-sample MC dropout instead and print `mean ± std` per label — see
+[MODEL_CARD.md](MODEL_CARD.md) for what this uncertainty estimate does and
+doesn't capture before treating a low std as reassuring.
 
 ### 5. Run the Inference API
 
@@ -176,7 +185,7 @@ uvicorn src.api:app --host 0.0.0.0 --port 8000
 | Endpoint | Method | Returns |
 |---|---|---|
 | `/health` | GET | device, checkpoint path, checkpoint epoch |
-| `/predict` | POST (multipart `file`) | JSON: probability per pathology |
+| `/predict` | POST (multipart `file`) | JSON: probability per pathology (add `?n_samples=20` for MC-dropout `uncertainty`) |
 | `/predict/gradcam?label=Cardiomegaly` | POST (multipart `file`) | PNG Grad-CAM overlay for that label |
 
 ```bash
@@ -225,10 +234,15 @@ eager vs. traced output match before saving.
 python -m unittest discover -s tests -v
 ```
 
-41 tests, all offline against a tiny local ViT checkpoint instead of the full
+55 tests, all offline against a tiny local ViT checkpoint instead of the full
 ViT-B/16 or the real dataset — preprocessing shapes, the model forward pass,
-Grad-CAM, TorchScript export, the API's endpoints (via FastAPI's TestClient),
-and dataset label/split logic. No GPU or dataset download required.
+MC-dropout uncertainty, Grad-CAM (including a regression test for the
+second-to-last-layer fix below), TorchScript export, the API's endpoints
+(via FastAPI's TestClient), the bbox-eval pointing-game metric, and dataset
+label/split logic. No GPU or dataset download required. (`src/bbox_eval.py`
+itself needs real images and a real checkpoint — it's validated by an
+actual run against the real data, documented in the Grad-CAM section below,
+not a unit test.)
 
 ---
 
@@ -239,29 +253,30 @@ First full run of the pipeline end to end — `python -m src.train --epochs 20
 and then degrades as the unfrozen ViT backbone overfits; the checkpointing
 logic already keeps the best epoch rather than the last one.
 
-| Pathology | AUC-ROC (epoch 7, best checkpoint) |
-|---|---|
-| Edema | 0.890 |
-| Hernia | 0.888 |
-| Effusion | 0.881 |
-| Cardiomegaly | 0.869 |
-| Pneumothorax | 0.839 |
-| Mass | 0.823 |
-| Emphysema | 0.821 |
-| Atelectasis | 0.799 |
-| Consolidation | 0.789 |
-| Pleural_Thickening | 0.777 |
-| No Finding | 0.730 |
-| Pneumonia | 0.723 |
-| Fibrosis | 0.696 |
-| Nodule | 0.696 |
-| Infiltration | 0.582 |
-| **Macro Average** | **0.787** |
+| Pathology | Val AUC (epoch 7, used for checkpoint selection) | Test AUC (held out, never touched) |
+|---|---|---|
+| Hernia | 0.888 | 0.910 |
+| Cardiomegaly | 0.869 | 0.843 |
+| Edema | 0.890 | 0.828 |
+| Pneumothorax | 0.839 | 0.804 |
+| Effusion | 0.881 | 0.788 |
+| Emphysema | 0.821 | 0.770 |
+| Mass | 0.823 | 0.743 |
+| Fibrosis | 0.696 | 0.736 |
+| Atelectasis | 0.799 | 0.722 |
+| Pleural_Thickening | 0.777 | 0.718 |
+| Consolidation | 0.789 | 0.711 |
+| No Finding | 0.730 | 0.709 |
+| Nodule | 0.696 | 0.690 |
+| Infiltration | 0.582 | 0.683 |
+| Pneumonia | 0.723 | 0.647 |
+| **Macro Average** | **0.787** | **0.753** |
 
-- Best checkpoint: `models/best_thoravis.pt`, epoch 7/20, val macro AUC **0.7867** (not committed — see `.gitignore`; regenerate with the command above).
+- Best checkpoint: `models/best_thoravis.pt`, epoch 7/20 (not committed — see `.gitignore`; regenerate with the command above).
+- **The test column matters more than the val column.** `get_dataloaders()` builds a `test_loader` that `ThoraVisTrainer.train()` never touches — every number anywhere else in this README (health check included) was on validation, which was also used to pick epoch 7 as "best," so it carries a small optimistic bias by construction. The 0.787 → 0.753 gap (val → true held-out test) is that bias, made visible instead of assumed away — and it's a modest, expected-sized gap, not a red flag.
 - By epoch 20, train loss keeps falling (0.286 → 0.139) while val loss climbs back up (0.243 → 0.255) and macro AUC drifts down to 0.749 — the model is memorizing past epoch ~7. Worth an early-stopping callback rather than a fixed 20 epochs.
-- `Infiltration` and `Nodule` are the weakest classes — consistent with them being genuinely hard, diffuse, low-prevalence findings in ChestX-ray14, not obviously a pipeline bug.
-- Full per-epoch history and this table's provenance: `results/run_summary.txt` (regenerate, gitignored).
+- `Infiltration`, `Nodule`, and `Pneumonia` are the weakest classes on test — consistent with them being genuinely hard, diffuse, low-prevalence findings in ChestX-ray14, not obviously a pipeline bug. Note the per-class ranking isn't perfectly stable between val and test (e.g. Fibrosis and Infiltration rank higher on test than val) — expected sampling noise at these per-class positive counts, not evidence of anything wrong.
+- Test-set calibration: ECE 0.0121 (`results/test_set_evaluation.txt`, regenerate, gitignored). Full per-epoch val history: `results/run_summary.txt`.
 
 ---
 
@@ -301,12 +316,62 @@ single ECE number alone; look at the curve.
 Gradient-weighted Class Activation Maps highlight *which pixels drove each prediction*, overlaid on the original X-ray using OpenCV's `applyColorMap`.
 
 ```python
-from src.gradcam import GradCAMVisualizer
+from src.gradcam import GradCAMViT
+from src.preprocessing import overlay_heatmap
 
-viz = GradCAMVisualizer(model, target_layer="vit.encoder.layer[-1]")
-heatmap = viz.generate(image_tensor, target_class=2)  # Cardiomegaly
-viz.save_overlay(original_image, heatmap, "results/gradcam_cardiomegaly.png")
+cam = GradCAMViT(model)
+heatmap = cam.generate(image_tensor, target_class=2)  # Cardiomegaly
+blended = overlay_heatmap(original_image_np, heatmap)
+cam.remove_hooks()
 ```
+
+**Which transformer layer to hook matters, and it's not the last one.** With
+a CLS-token-only classification head, the final layer's own patch-token
+outputs have *zero* gradient path to the logit — `ViTModel`'s last LayerNorm
+operates per-token, so it can't mix patch information into the CLS
+position. `GradCAMViT` hooks the second-to-last layer by default
+(`layer_index=-2`); hooking the last layer produces an all-zero heatmap on
+every input, silently — the class's own bounds ([0,1]) don't catch that a
+constant heatmap satisfies them too. Verified with `tests/test_gradcam.py`.
+
+### Validation: does it look where a radiologist would?
+
+NIH released 984 hand-drawn bounding boxes across 8 pathologies
+(`BBox_List_2017.csv`) — a real, checkable measure of localization, not
+just a plausible-looking heatmap. `src/bbox_eval.py` runs Grad-CAM against
+every annotated image and checks whether the heatmap's peak pixel falls
+inside the radiologist's box ("pointing game" accuracy, Zhang et al. 2016),
+alongside a trivial "always guess image center" baseline for comparison —
+chest X-ray anatomy is roughly centered, so that baseline is a real bar to
+clear, not a strawman.
+
+```bash
+python -m src.bbox_eval --checkpoint models/best_thoravis.pt --image-root <dir with extracted NIH images>
+```
+
+| Pathology | Model | Center baseline | n |
+|---|---|---|---|
+| Cardiomegaly | 0.336 | 0.973 | 146 |
+| Pneumonia | 0.208 | 0.142 | 120 |
+| Infiltration | 0.179 | 0.228 | 123 |
+| Mass | 0.071 | 0.106 | 85 |
+| Effusion | 0.065 | 0.026 | 153 |
+| Pneumothorax | 0.041 | 0.010 | 98 |
+| Atelectasis | 0.033 | 0.061 | 180 |
+| Nodule | 0.013 | 0.000 | 79 |
+| **Overall** | **0.125** | **0.215** | 984 |
+
+The pooled "overall" row is honestly a bit misleading — don't read it on
+its own. The model beats the naive center-guess on 4 of 8 pathologies
+(Pneumonia, Effusion, Pneumothorax, Nodule), which is real evidence of
+non-trivial localization for those findings. But Cardiomegaly (heart
+enlargement) is anatomically central by nature, so the center baseline
+scores 0.973 there by luck alone regardless of any actual detection —
+that single pathology's baseline dominance drags the pooled average below
+the model's own average. Read per pathology, not the aggregate. None of
+these numbers are high in absolute terms (published weakly-supervised
+CNN localization on this benchmark typically clears 40-60%+) — this is
+evidence of *some* real signal, not a validated detector.
 
 ---
 

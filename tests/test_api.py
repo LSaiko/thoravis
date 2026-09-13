@@ -61,6 +61,18 @@ class TestThoraVisAPI(unittest.TestCase):
         self.assertEqual(set(body["predictions"].keys()), set(PATHOLOGY_LABELS))
         self.assertTrue(all(0.0 <= p <= 1.0 for p in body["predictions"].values()))
         self.assertEqual(body["threshold"], 0.5)
+        self.assertNotIn("uncertainty", body)  # default n_samples=1: no MC dropout overhead
+
+    def test_predict_with_n_samples_adds_uncertainty(self):
+        with TestClient(app) as client:
+            resp = client.post(
+                "/predict?n_samples=5",
+                files={"file": ("xray.png", _fake_xray_bytes(), "image/png")},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(set(body["uncertainty"].keys()), set(PATHOLOGY_LABELS))
+        self.assertTrue(all(s >= 0.0 for s in body["uncertainty"].values()))
 
     def test_predict_rejects_unreadable_file(self):
         with TestClient(app) as client:
