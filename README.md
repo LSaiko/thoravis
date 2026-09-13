@@ -40,6 +40,8 @@ This project was built to concretely demonstrate:
 thoravis/
 ├── README.md
 ├── requirements.txt
+├── Dockerfile           ← CPU inference image (see "Run via Docker")
+├── .dockerignore
 ├── .github/workflows/
 │   └── tests.yml        ← CI: installs deps, runs tests/ on every push/PR
 ├── notebooks/
@@ -50,12 +52,17 @@ thoravis/
 │   ├── model.py         ← ViT fine-tuning with custom classification head
 │   ├── train.py         ← Training loop, AUC tracking, checkpointing
 │   ├── predict.py       ← Single-image inference CLI
-│   ├── evaluate.py      ← Per-pathology AUC-ROC, confusion matrices
+│   ├── api.py           ← FastAPI inference service (/predict, /predict/gradcam)
+│   ├── export.py        ← TorchScript export CLI
+│   ├── evaluate.py      ← Per-pathology AUC-ROC, calibration, confusion matrices
 │   └── gradcam.py       ← Grad-CAM heatmap generation with OpenCV overlay
 ├── tests/
 │   ├── test_preprocessing.py
 │   ├── test_model.py
 │   ├── test_predict.py
+│   ├── test_api.py
+│   ├── test_export.py
+│   ├── test_gradcam.py
 │   ├── test_train.py
 │   ├── test_evaluate.py
 │   └── test_dataset.py
@@ -160,15 +167,68 @@ python -m src.predict --image path/to/xray.png --checkpoint models/best_thoravis
 Prints a sigmoid probability for each of the 15 pathology labels, marking the
 ones at or above `--threshold` (default 0.5).
 
-### 5. Run Tests
+### 5. Run the Inference API
+
+```bash
+uvicorn src.api:app --host 0.0.0.0 --port 8000
+```
+
+| Endpoint | Method | Returns |
+|---|---|---|
+| `/health` | GET | device, checkpoint path, checkpoint epoch |
+| `/predict` | POST (multipart `file`) | JSON: probability per pathology |
+| `/predict/gradcam?label=Cardiomegaly` | POST (multipart `file`) | PNG Grad-CAM overlay for that label |
+
+```bash
+curl -F file=@xray.png "http://localhost:8000/predict?threshold=0.5"
+curl -F file=@xray.png "http://localhost:8000/predict/gradcam?label=Effusion" -o gradcam.png
+```
+
+Set `THORAVIS_CHECKPOINT` to point at a different checkpoint (default `models/best_thoravis.pt`).
+
+### 6. Run via Docker
+
+```bash
+docker build -t thoravis .
+
+# Use an absolute host path to models/ — $(pwd) doesn't reliably translate
+# through Docker Desktop for Windows' volume-mount path handling.
+docker run -p 8000:8000 -v /absolute/path/to/thoravis/models:/app/models thoravis
+```
+
+Builds to ~3GB using `requirements-api.txt` (serving deps only — no
+jupyter/notebook/training tooling) and CPU-only PyTorch pulled explicitly
+from PyTorch's own CPU wheel index, since PyPI's default `torch` wheel now
+bundles the full NVIDIA CUDA runtime as pip dependencies (~10GB) even with
+no GPU involved. The checkpoint is mounted at runtime, not baked into the
+image, since it's ~350MB and gitignored. For GPU inference, install a
+CUDA-enabled torch build in the Dockerfile and run with `docker run --gpus all`.
+
+Verified end to end against the real epoch-7 checkpoint: `docker build`,
+`docker run` with the checkpoint mounted, and all three endpoints
+(`/health`, `/predict`, `/predict/gradcam`) hit successfully from inside
+the running container.
+
+### 7. Export to TorchScript
+
+```bash
+python -m src.export --checkpoint models/best_thoravis.pt --out models/thoravis_traced.pt
+```
+
+Produces a single file that loads and runs with plain `torch` — no
+`transformers`/HuggingFace Hub access needed at inference time. Verifies
+eager vs. traced output match before saving.
+
+### 8. Run Tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Covers preprocessing output shapes, the classifier's forward pass (against a tiny
-ViT checkpoint, not the full ViT-B/16), and label-vector / class-weight construction
-in `ChestXrayDataset` — no GPU or full dataset download required.
+41 tests, all offline against a tiny local ViT checkpoint instead of the full
+ViT-B/16 or the real dataset — preprocessing shapes, the model forward pass,
+Grad-CAM, TorchScript export, the API's endpoints (via FastAPI's TestClient),
+and dataset label/split logic. No GPU or dataset download required.
 
 ---
 
@@ -279,6 +339,9 @@ accelerate>=0.27.0
 Pillow>=10.2.0
 jupyter>=1.0.0
 ipywidgets>=8.1.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
 ```
 
 ---

@@ -12,11 +12,12 @@ Evaluation utilities for ThoraVis:
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+# matplotlib is imported lazily inside each plot_*() function below — the
+# metric-computation functions (compute_auc_table, expected_calibration_error,
+# collect_predictions, ...) don't need it, and it's a heavy dependency to
+# force onto e.g. the inference API, which never plots anything.
 from sklearn.metrics import (
     roc_auc_score, roc_curve, precision_recall_fscore_support,
-    confusion_matrix, ConfusionMatrixDisplay,
 )
 from tqdm import tqdm
 from typing import Optional, Dict, Tuple
@@ -121,6 +122,8 @@ def plot_roc_curves(
     """
     Plot ROC curves for the top-k most prevalent pathologies.
     """
+    import matplotlib.pyplot as plt
+
     # Select top-k by number of positive examples
     counts   = labels.sum(axis=0)
     top_idxs = np.argsort(counts)[::-1][:top_k]
@@ -184,6 +187,8 @@ def compute_pr_f1(
 
 def plot_training_history(history: dict, save_path: Optional[str] = None):
     """Plot loss curves and macro AUC from trainer.history dict."""
+    import matplotlib.pyplot as plt
+
     epochs = range(1, len(history["train_loss"]) + 1)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -260,6 +265,8 @@ def plot_reliability_diagram(
     save_path: Optional[str] = None,
 ):
     """Plot observed frequency vs. mean predicted probability per bin."""
+    import matplotlib.pyplot as plt
+
     probs_flat  = probs.ravel()
     labels_flat = labels.ravel()
 

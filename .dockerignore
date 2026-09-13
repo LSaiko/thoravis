@@ -1,0 +1,12 @@
+.git/
+.github/
+notebooks/
+results/
+models/*.pt
+models/*.pth
+tests/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log

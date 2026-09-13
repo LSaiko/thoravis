@@ -15,8 +15,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from typing import Optional
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+# matplotlib is imported lazily inside visualize() below — generate(), the
+# method the inference API actually calls, never needs it.
 
 from src.dataset import PATHOLOGY_LABELS
 from src.preprocessing import overlay_heatmap
@@ -45,12 +45,31 @@ class GradCAMViT:
         self.device = device or next(model.parameters()).device
 
         # Target: last ViT encoder layer's output
-        self._target_layer = model.backbone.encoder.layer[-1]
+        self._target_layer = self._last_vit_layer(model.backbone)
 
         self._gradients   = None
         self._activations = None
         self._hooks       = []
         self._register_hooks()
+
+    @staticmethod
+    def _last_vit_layer(backbone):
+        """
+        Locate the last transformer block on a HuggingFace ViTModel.
+
+        transformers restructured this between versions: older releases
+        nest blocks under `backbone.encoder.layer`, current ones (5.x)
+        expose `backbone.layers` directly on the model. Support both so
+        Grad-CAM doesn't silently break on a transformers upgrade.
+        """
+        if hasattr(backbone, "encoder") and hasattr(backbone.encoder, "layer"):
+            return backbone.encoder.layer[-1]
+        if hasattr(backbone, "layers"):
+            return backbone.layers[-1]
+        raise AttributeError(
+            "Could not locate ViT transformer blocks on this backbone "
+            "(expected .encoder.layer or .layers)"
+        )
 
     def _register_hooks(self):
         def forward_hook(module, input, output):
@@ -149,6 +168,9 @@ class GradCAMViT:
         top_k              : number of top predictions to visualize
         save_path          : optional path to save figure
         """
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+
         # Get top-k predictions
         with torch.no_grad():
             probs = torch.sigmoid(self.model(image_tensor.unsqueeze(0).to(self.device)))

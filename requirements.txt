@@ -22,3 +22,8 @@ accelerate>=0.27.0  # used internally by HuggingFace datasets for fast loading
 # Notebook
 jupyter>=1.0.0
 ipywidgets>=8.1.0
+
+# Inference API
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9  # required by FastAPI/Starlette for file-upload form parsing

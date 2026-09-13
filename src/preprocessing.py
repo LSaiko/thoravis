@@ -18,8 +18,9 @@ import torch
 from torchvision import transforms
 from PIL import Image
 from typing import Optional, Tuple
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+# matplotlib is imported lazily inside visualize_pipeline() below — it's a
+# heavy, purely-optional dependency for one debug/notebook helper, and
+# nothing else in this module (or the inference path built on it) needs it.
 
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -167,6 +168,9 @@ class XRayPreprocessor:
         Plot the step-by-step preprocessing pipeline for a single X-ray.
         Great for README / notebook showcase.
         """
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+
         gray     = self._ensure_gray(image)
         resized  = self._resize(gray)
         clahe_d  = self._clahe(resized)
