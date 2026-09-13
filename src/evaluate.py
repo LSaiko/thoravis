@@ -329,3 +329,49 @@ def fit_temperature(
 
     optimizer.step(closure)
     return float(log_temperature.exp().item())
+
+
+def fit_isotonic_calibration(probs: np.ndarray, labels: np.ndarray):
+    """
+    Fit a pooled isotonic regression mapping raw sigmoid probability to
+    calibrated probability.
+
+    Temperature scaling (above) is a single global scalar — it can only
+    correct miscalibration of the form sigmoid(logit / T), i.e. uniform
+    over- or under-confidence. This project's own reliability diagram
+    found something a single temperature can't fix in principle:
+    near-perfect calibration close to 0, but real overconfidence
+    specifically in the 0.4-0.9 range. Isotonic regression fits an
+    arbitrary monotonic mapping instead, so it *can* correct miscalibration
+    that varies across the confidence range — verified on synthetic data
+    matching this exact failure shape (tests/test_evaluate.py).
+
+    In practice, on this project's actual checkpoint, it didn't help:
+    fit on val and evaluated on the real held-out test set, it scored
+    *worse* than temperature scaling both overall (ECE 0.0171 vs 0.0034)
+    and in the 0.4-0.9 band specifically (0.1499 vs 0.0789) — see
+    results/calibration_comparison.txt (regenerate, gitignored). Most
+    likely cause: pooling across 15 pathologies with different base rates
+    and probably different miscalibration shapes gives isotonic regression
+    enough freedom to fit validation-set sampling noise that doesn't
+    transfer to test. Temperature scaling remains the better real-world
+    choice here despite being the theoretically cruder tool — this
+    function is kept because it's a legitimate technique that could help
+    on a different checkpoint or a per-class fit, not because it won here.
+
+    Must be fit on a validation split, never on the split being reported —
+    same rule as temperature scaling.
+
+    Returns a fitted sklearn IsotonicRegression; apply with
+    apply_calibration(calibrator, probs).
+    """
+    from sklearn.isotonic import IsotonicRegression
+
+    calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    calibrator.fit(probs.ravel(), labels.ravel())
+    return calibrator
+
+
+def apply_calibration(calibrator, probs: np.ndarray) -> np.ndarray:
+    """Apply a fitted isotonic calibrator (see fit_isotonic_calibration), preserving shape."""
+    return calibrator.predict(probs.ravel()).reshape(probs.shape)

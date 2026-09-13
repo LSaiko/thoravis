@@ -6,8 +6,10 @@ import numpy as np
 
 from src.dataset import NUM_CLASSES, PATHOLOGY_LABELS
 from src.evaluate import (
+    apply_calibration,
     compute_auc_table,
     expected_calibration_error,
+    fit_isotonic_calibration,
     fit_temperature,
 )
 
@@ -62,6 +64,38 @@ class TestFitTemperature(unittest.TestCase):
 
         fitted_t = fit_temperature(observed_logits, labels)
         self.assertAlmostEqual(fitted_t, scale, delta=0.5)
+
+
+class TestIsotonicCalibration(unittest.TestCase):
+    def test_corrects_a_non_uniform_distortion_temperature_cannot(self):
+        # A "hump" in the middle of the range that isn't expressible as
+        # sigmoid(logit / T) for any single T — exactly the shape this
+        # project's own reliability diagram found (fine near 0, real
+        # overconfidence at 0.4-0.9).
+        rng = np.random.default_rng(2)
+        n = 20_000
+        true_prob = rng.random(n)
+        raw_prob = np.clip(true_prob + 0.18 * np.sin(np.pi * true_prob), 0, 1)
+        labels = (rng.random(n) < true_prob).astype(float)
+
+        ece_before = expected_calibration_error(raw_prob, labels)
+
+        calibrator = fit_isotonic_calibration(raw_prob, labels)
+        calibrated = apply_calibration(calibrator, raw_prob)
+        ece_after = expected_calibration_error(calibrated, labels)
+
+        self.assertLess(ece_after, ece_before / 5)
+
+    def test_apply_calibration_preserves_input_shape(self):
+        rng = np.random.default_rng(3)
+        probs = rng.random((50, NUM_CLASSES))
+        labels = (rng.random((50, NUM_CLASSES)) < 0.5).astype(float)
+
+        calibrator = fit_isotonic_calibration(probs, labels)
+        calibrated = apply_calibration(calibrator, probs)
+
+        self.assertEqual(calibrated.shape, probs.shape)
+        self.assertTrue(np.all(calibrated >= 0.0) and np.all(calibrated <= 1.0))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,9 @@ _train_epoch()/_val_epoch() logic — including the AMP code path — without
 touching the network.
 """
 
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -63,6 +65,70 @@ class TestEpochRoutinesCPU(unittest.TestCase):
         self.assertGreaterEqual(macro_auc, 0.0)
         self.assertLessEqual(macro_auc, 1.0)
         self.assertIsInstance(per_class, dict)
+
+
+def _make_full_trainer(tmp_checkpoint_dir, epochs, early_stopping_patience):
+    """Enough of a real trainer for train() itself to run — not just the
+    epoch routines above — with _val_epoch mocked to a fixed AUC sequence
+    so early stopping can be tested deterministically."""
+    device = torch.device("cpu")
+    img_size = 32
+    ckpt = make_tiny_vit_checkpoint(image_size=img_size)
+    model = ThoraVisClassifier(num_classes=NUM_CLASSES, pretrained_ckpt=ckpt).to(device)
+
+    trainer = ThoraVisTrainer.__new__(ThoraVisTrainer)
+    trainer.device = device
+    trainer.use_amp = False
+    trainer.scaler = torch.amp.GradScaler(device="cpu", enabled=False)
+    trainer.model = model
+    trainer.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    trainer.lr = 1e-4
+    trainer.criterion = WeightedBCELoss()
+    trainer.train_loader = _fake_batches(2, batch_size=2, img_size=img_size)
+    trainer.val_loader = _fake_batches(2, batch_size=2, img_size=img_size)
+    trainer.epochs = epochs
+    trainer.warmup_epochs = 0
+    trainer.checkpoint_dir = tmp_checkpoint_dir
+    trainer.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        trainer.optimizer, T_max=max(1, epochs)
+    )
+    trainer.history = {"train_loss": [], "val_loss": [], "val_auc_macro": [], "val_auc_per_class": []}
+    trainer.best_val_auc = 0.0
+    trainer.epochs_since_improvement = 0
+    trainer.early_stopping_patience = early_stopping_patience
+    return trainer
+
+
+class TestEarlyStopping(unittest.TestCase):
+    def test_stops_after_patience_epochs_without_improvement(self):
+        # Improves for 2 epochs, then plateaus/declines for the rest.
+        auc_sequence = [0.60, 0.70, 0.65, 0.64, 0.63]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            trainer = _make_full_trainer(tmp_dir, epochs=5, early_stopping_patience=2)
+            with patch.object(
+                trainer, "_val_epoch",
+                side_effect=[(0.5, auc, {}) for auc in auc_sequence],
+            ):
+                trainer.train()
+
+        # epoch0=0.60 (saved), epoch1=0.70 (saved, counter reset),
+        # epoch2=0.65 (counter=1), epoch3=0.64 (counter=2 -> stop after this)
+        self.assertEqual(len(trainer.history["val_auc_macro"]), 4)
+        self.assertEqual(trainer.best_val_auc, 0.70)
+
+    def test_runs_all_epochs_when_patience_is_none(self):
+        auc_sequence = [0.60, 0.61, 0.60, 0.59, 0.58]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            trainer = _make_full_trainer(tmp_dir, epochs=5, early_stopping_patience=None)
+            with patch.object(
+                trainer, "_val_epoch",
+                side_effect=[(0.5, auc, {}) for auc in auc_sequence],
+            ):
+                trainer.train()
+
+        self.assertEqual(len(trainer.history["val_auc_macro"]), 5)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "AMP only engages on CUDA")

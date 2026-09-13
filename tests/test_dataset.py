@@ -9,6 +9,7 @@ touching the network.
 
 import unittest
 
+import numpy as np
 import torch
 
 from src.dataset import ChestXrayDataset, NUM_CLASSES, set_global_seed, _train_val_indices
@@ -89,6 +90,44 @@ class TestTrainValIndices(unittest.TestCase):
         self.assertGreater(len(train_idx), 0)
         self.assertGreater(len(val_idx), 0)
         self.assertEqual(len(train_idx) + len(val_idx), 112_120)
+
+
+class TestPatientGroupedSplit(unittest.TestCase):
+    def test_no_patient_appears_in_both_train_and_val(self):
+        # 10 patients, 1-4 images each, 30 rows total.
+        rng = np.random.default_rng(0)
+        patient_ids = np.repeat(np.arange(10), rng.integers(1, 5, size=10))
+        total = len(patient_ids)
+
+        train_idx, val_idx = _train_val_indices(
+            total, val_split=0.2, test_reserve=0, patient_ids=patient_ids, seed=1,
+        )
+
+        train_patients = set(patient_ids[train_idx])
+        val_patients = set(patient_ids[val_idx])
+        self.assertEqual(train_patients & val_patients, set())
+        self.assertEqual(set(train_idx) | set(val_idx), set(range(total)))
+
+    def test_respects_test_reserve_with_patient_grouping(self):
+        patient_ids = np.repeat(np.arange(20), 5)  # 20 patients x 5 images = 100 rows
+        total = len(patient_ids)
+
+        train_idx, val_idx = _train_val_indices(
+            total, val_split=0.2, test_reserve=20, patient_ids=patient_ids, seed=1,
+        )
+
+        # The reserved tail (last 20 indices) must never appear in train/val.
+        reserved = set(range(total - 20, total))
+        self.assertEqual((set(train_idx) | set(val_idx)) & reserved, set())
+        self.assertEqual(set(train_idx) & set(val_idx), set())
+
+    def test_falls_back_to_index_range_when_patient_ids_is_none(self):
+        # Same call as the pre-patient-grouping tests above, with the new
+        # parameters at their defaults — behavior must be unchanged.
+        train_idx, val_idx = _train_val_indices(1000, val_split=0.15, test_reserve=100)
+        self.assertEqual(set(train_idx) & set(val_idx), set())
+        self.assertEqual(len(val_idx), 150)
+        self.assertEqual(len(train_idx), 750)
 
 
 class TestSetGlobalSeed(unittest.TestCase):

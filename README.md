@@ -96,6 +96,18 @@ thoravis/
 **15 Label Classes (14 diseases + No Finding):**
 `No Finding` · `Atelectasis` · `Cardiomegaly` · `Effusion` · `Infiltration` · `Mass` · `Nodule` · `Pneumonia` · `Pneumothorax` · `Consolidation` · `Edema` · `Emphysema` · `Fibrosis` · `Pleural Thickening` · `Hernia`
 
+**Patient-grouped splitting.** The `image-classification` config used above never
+exposes patient ID or filename — but its row order was verified (empirically,
+against NIH's own `Data_Entry_2017_v2020.csv`) to match that CSV's row order
+exactly for grouping purposes: some images get reordered *within* a patient's
+own follow-up sequence, but none ever land in a different patient's block. So
+`get_dataloaders()` recovers patient ID by row position and defaults to
+`use_patient_grouping=True` — a `GroupShuffleSplit` on patient ID instead of a
+raw index cut, guaranteeing no patient's images can straddle the train/val
+boundary. Falls back to the old index-range split (with a printed warning) if
+the metadata fetch fails. **The checkpoint reported below was trained under
+this patient-grouped split** — see the Results section.
+
 ---
 
 ## 🔬 Pipeline Architecture
@@ -162,6 +174,9 @@ python -m src.train --epochs 20 --batch_size 64 --lr 2e-5
 
 # Disable mixed precision (on by default when a CUDA GPU is available)
 python -m src.train --epochs 20 --batch_size 64 --no-amp
+
+# Stop once val AUC hasn't improved for 3 epochs, instead of a fixed 20
+python -m src.train --epochs 20 --batch_size 64 --early-stopping-patience 3
 ```
 
 ### 4. Run Inference on a Single Image
@@ -246,37 +261,41 @@ not a unit test.)
 
 ---
 
-## 📊 Results (Full dataset: ~73.5k train / ~13k val, 20 epochs)
+## 📊 Results (Full dataset: ~73.9k train / ~12.6k val, patient-grouped split, 20 epochs)
 
-First full run of the pipeline end to end — `python -m src.train --epochs 20
---batch_size 64 --lr 2e-5`, ~4.7h on a single RTX 5060. Val AUC peaks early
-and then degrades as the unfrozen ViT backbone overfits; the checkpointing
-logic already keeps the best epoch rather than the last one.
+`python -m src.train --epochs 20 --batch_size 64 --lr 2e-5
+--early-stopping-patience 3`, ~2.7h on a single RTX 5060 (early stopping cut
+it well short of the full 20 epochs). Trained under the patient-grouped
+split (`GroupShuffleSplit` on patient ID — no patient's images appear in
+both train and val) described in the Dataset section below. Val AUC peaks
+around epoch 9 and then degrades as the unfrozen ViT backbone overfits;
+early stopping triggered after 3 epochs without improvement (epoch 12).
 
-| Pathology | Val AUC (epoch 7, used for checkpoint selection) | Test AUC (held out, never touched) |
+| Pathology | Val AUC (epoch 9, used for checkpoint selection) | Test AUC (held out, never touched) |
 |---|---|---|
-| Hernia | 0.888 | 0.910 |
-| Cardiomegaly | 0.869 | 0.843 |
-| Edema | 0.890 | 0.828 |
-| Pneumothorax | 0.839 | 0.804 |
-| Effusion | 0.881 | 0.788 |
-| Emphysema | 0.821 | 0.770 |
-| Mass | 0.823 | 0.743 |
-| Fibrosis | 0.696 | 0.736 |
-| Atelectasis | 0.799 | 0.722 |
-| Pleural_Thickening | 0.777 | 0.718 |
-| Consolidation | 0.789 | 0.711 |
-| No Finding | 0.730 | 0.709 |
-| Nodule | 0.696 | 0.690 |
-| Infiltration | 0.582 | 0.683 |
-| Pneumonia | 0.723 | 0.647 |
-| **Macro Average** | **0.787** | **0.753** |
+| Edema | 0.902 | 0.834 |
+| Cardiomegaly | 0.868 | 0.846 |
+| Effusion | 0.878 | 0.794 |
+| Hernia | 0.864 | 0.846 |
+| Pneumothorax | 0.823 | 0.807 |
+| Emphysema | 0.808 | 0.789 |
+| Consolidation | 0.803 | 0.717 |
+| Mass | 0.801 | 0.755 |
+| Pleural_Thickening | 0.779 | 0.725 |
+| Fibrosis | 0.776 | 0.761 |
+| Atelectasis | 0.776 | 0.719 |
+| No Finding | 0.747 | 0.707 |
+| Pneumonia | 0.714 | 0.669 |
+| Nodule | 0.706 | 0.691 |
+| Infiltration | 0.674 | 0.684 |
+| **Macro Average** | **0.795** | **0.756** |
 
-- Best checkpoint: `models/best_thoravis.pt`, epoch 7/20 (not committed — see `.gitignore`; regenerate with the command above).
-- **The test column matters more than the val column.** `get_dataloaders()` builds a `test_loader` that `ThoraVisTrainer.train()` never touches — every number anywhere else in this README (health check included) was on validation, which was also used to pick epoch 7 as "best," so it carries a small optimistic bias by construction. The 0.787 → 0.753 gap (val → true held-out test) is that bias, made visible instead of assumed away — and it's a modest, expected-sized gap, not a red flag.
-- By epoch 20, train loss keeps falling (0.286 → 0.139) while val loss climbs back up (0.243 → 0.255) and macro AUC drifts down to 0.749 — the model is memorizing past epoch ~7. Worth an early-stopping callback rather than a fixed 20 epochs.
-- `Infiltration`, `Nodule`, and `Pneumonia` are the weakest classes on test — consistent with them being genuinely hard, diffuse, low-prevalence findings in ChestX-ray14, not obviously a pipeline bug. Note the per-class ranking isn't perfectly stable between val and test (e.g. Fibrosis and Infiltration rank higher on test than val) — expected sampling noise at these per-class positive counts, not evidence of anything wrong.
-- Test-set calibration: ECE 0.0121 (`results/test_set_evaluation.txt`, regenerate, gitignored). Full per-epoch val history: `results/run_summary.txt`.
+- Best checkpoint: `models/best_thoravis.pt`, epoch 9/20 (not committed — see `.gitignore`; regenerate with the command above). The prior index-split checkpoint (epoch 7, val 0.787 / test 0.753) is kept for comparison at `models/best_thoravis_oldsplit.pt`.
+- **The test column matters more than the val column.** `get_dataloaders()` builds a `test_loader` that `ThoraVisTrainer.train()` never touches — every number anywhere else in this README (health check included) was on validation, which was also used to pick epoch 9 as "best," so it carries a small optimistic bias by construction. The 0.795 → 0.756 gap (val → true held-out test) is that bias, made visible instead of assumed away — a modest, expected-sized gap, not a red flag, and essentially the same size as the old index-split checkpoint's gap (0.787 → 0.753). **The patient-grouped split did not inflate the old numbers in any visible way** — test macro AUC actually moved slightly up (0.753 → 0.756), well within run-to-run noise for a single training run. That's a mildly reassuring result, not proof of anything: one run isn't enough to conclude the leak (when it existed) had zero effect, only that it wasn't large enough here to show up as an obvious drop.
+- Early stopping (`--early-stopping-patience 3`) triggered after epoch 12, replacing the earlier hand-picked-after-the-fact epoch selection.
+- `Infiltration`, `Nodule`, and `Pneumonia` are the weakest classes on test — consistent with them being genuinely hard, diffuse, low-prevalence findings in ChestX-ray14, not obviously a pipeline bug. Per-class ranking isn't perfectly stable between val and test — expected sampling noise at these per-class positive counts, not evidence of anything wrong.
+- Test-set calibration: ECE 0.0144 (`results/test_set_evaluation_newsplit.txt`, regenerate, gitignored). Full per-epoch training log: `results/train_full_run.log`; the prior run's summary is kept at `results/run_summary_oldsplit.txt` for comparison.
+- This checkpoint was trained and evaluated entirely under the patient-grouped split — see the Dataset section below for how patient ID is recovered and verified.
 
 ---
 
@@ -301,13 +320,29 @@ temperature = fit_temperature(logits, labels)
 `expected_calibration_error()` reports a single pooled ECE number if you just
 need a scalar rather than the plot.
 
-**On the best checkpoint above:** pooled ECE is a deceptively good **0.019**
-— but that's dominated by the large mass of easy, correctly-low-confidence
-negatives across 15 labels. The reliability diagram tells the real story:
-predictions in the 0.4–0.9 range (the ones that'd actually drive a decision)
-are consistently overconfident — e.g. ~0.83 predicted maps to only ~0.36
-observed frequency. Fitted temperature is a mild `T ≈ 1.07`. Don't trust the
-single ECE number alone; look at the curve.
+**On the best checkpoint above:** raw (uncalibrated) test-set ECE is
+**0.0144** overall, but that's dominated by the large mass of easy,
+correctly-low-confidence negatives across 15 labels. The 0.4–0.9 band (the
+range that'd actually drive a decision) tells the real story: ECE **0.1684**
+there — real, sizeable overconfidence. Temperature scaling (fit on val,
+`T ≈ 1.05`) helps some (0.0112 overall, 0.1660 in-band) but doesn't erase
+the in-band problem. Don't trust the single overall ECE number alone; look
+at the band.
+
+**Tried fixing that band specifically with isotonic regression**
+(`fit_isotonic_calibration()`) since a single temperature can't in
+principle correct miscalibration that varies across the confidence range.
+Verified it works on synthetic data shaped like this exact problem — then,
+on the real checkpoint, it made things *worse*: test-set ECE 0.0275 vs.
+temperature scaling's 0.0112 overall, 0.2019 vs. 0.1660 in the 0.4–0.9 band
+specifically (`results/calibration_comparison.txt`, regenerate,
+gitignored). Same finding as with the prior (index-split) checkpoint, now
+confirmed on a second, independently-trained model. Most likely cause:
+pooling across 15 pathologies with different base rates gives isotonic
+regression enough freedom to fit validation-set noise that doesn't
+transfer to test. Temperature scaling remains the better real-world choice
+here, despite being the theoretically cruder tool — worth knowing before
+reaching for the fancier method by default.
 
 ---
 

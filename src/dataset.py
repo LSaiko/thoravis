@@ -147,10 +147,54 @@ def _worker_init_fn(worker_id: int) -> None:
     random.seed(seed)
 
 
+_patient_id_cache: Optional[np.ndarray] = None
+
+
+def _load_patient_ids_for_train_split() -> np.ndarray:
+    """
+    Patient ID for every row of the HF 'train' split, in the exact order
+    the dataset yields them — memoized per process (one network fetch,
+    cached to disk afterward by huggingface_hub regardless).
+
+    The image-classification config's own _generate_examples() never
+    exposes patient ID or filename directly. But its row order matches
+    NIH's own Data_Entry_2017 CSV, filtered to train_val_list.txt, in CSV
+    order: verified empirically that for all 86,524 train_val rows, the
+    dataset's label set at row i is found somewhere within row i's own
+    Patient ID block in the CSV (some images get reordered *within* a
+    patient's own follow-up sequence, which doesn't matter for grouping —
+    none ever land in a different patient's block). That's what makes
+    patient ID recoverable by position even though per-row label identity
+    isn't guaranteed to align exactly.
+    """
+    global _patient_id_cache
+    if _patient_id_cache is not None:
+        return _patient_id_cache
+
+    from huggingface_hub import hf_hub_download
+    import pandas as pd
+
+    csv_path = hf_hub_download(
+        "alkzar90/NIH-Chest-X-ray-dataset", "data/Data_Entry_2017_v2020.csv", repo_type="dataset"
+    )
+    train_val_path = hf_hub_download(
+        "alkzar90/NIH-Chest-X-ray-dataset", "data/train_val_list.txt", repo_type="dataset"
+    )
+    with open(train_val_path) as f:
+        train_val_names = set(line.strip() for line in f if line.strip())
+
+    df = pd.read_csv(csv_path)
+    df = df[df["Image Index"].isin(train_val_names)].reset_index(drop=True)
+    _patient_id_cache = df["Patient ID"].to_numpy()
+    return _patient_id_cache
+
+
 def _train_val_indices(
     total: int,
     val_split: float,
     test_reserve: int = 0,
+    patient_ids: Optional[np.ndarray] = None,
+    seed: int = 42,
 ) -> Tuple[List[int], List[int]]:
     """
     Disjoint (train_indices, val_indices) covering a pool of `total` items,
@@ -158,7 +202,23 @@ def _train_val_indices(
     (0 when the real held-out test split is used instead, as in full
     dataset mode). Always returns non-overlapping ranges — regression guard
     for a past bug where a `None` total silently made train == val.
+
+    If `patient_ids` is given, splits by GroupShuffleSplit keyed on patient
+    ID instead of a raw index cut, so no patient's images can straddle the
+    train/val boundary. Falls back to the plain index-range split
+    otherwise (e.g. when patient IDs couldn't be fetched).
     """
+    pool_end = total - test_reserve
+
+    if patient_ids is not None:
+        from sklearn.model_selection import GroupShuffleSplit
+
+        pool_indices = np.arange(pool_end)
+        pool_patient_ids = patient_ids[:pool_end]
+        splitter = GroupShuffleSplit(n_splits=1, test_size=val_split, random_state=seed)
+        train_idx, val_idx = next(splitter.split(pool_indices, groups=pool_patient_ids))
+        return sorted(pool_indices[train_idx].tolist()), sorted(pool_indices[val_idx].tolist())
+
     n_val   = int(total * val_split)
     n_train = total - n_val - test_reserve
     train_indices = list(range(0, n_train))
@@ -175,6 +235,7 @@ def get_dataloaders(
     test_split: float = 0.10,
     num_workers: int = 2,
     seed: int = 42,
+    use_patient_grouping: bool = True,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Build train / val / test DataLoaders from HuggingFace NIH ChestX-ray14.
@@ -187,6 +248,11 @@ def get_dataloaders(
     test_split  : fraction for test
     num_workers : DataLoader workers
     seed        : reproducibility
+    use_patient_grouping : split train/val by patient ID (GroupShuffleSplit)
+                  instead of a raw index cut, so no patient's images can
+                  appear in both. Requires one extra network fetch (NIH's
+                  own metadata CSV); falls back to the index-range split
+                  with a printed warning if that fetch fails.
 
     Returns
     -------
@@ -197,12 +263,22 @@ def get_dataloaders(
     train_preprocessor = XRayPreprocessor(augment=True)
     val_preprocessor   = XRayPreprocessor(augment=False)
 
+    patient_ids = None
+    if use_patient_grouping:
+        try:
+            patient_ids = _load_patient_ids_for_train_split()
+        except Exception as exc:
+            print(f"Warning: couldn't fetch patient IDs ({exc}); "
+                  f"falling back to index-range train/val split.")
+
     if subset_size is not None:
         # Demo mode: carve a small train/val/test triple out of subset_size,
         # sampling n_test from the *real* held-out test split (not from the
         # train pool) so it stays a genuine out-of-sample check.
         n_test = int(subset_size * test_split)
-        train_indices, val_indices = _train_val_indices(subset_size, val_split, test_reserve=n_test)
+        train_indices, val_indices = _train_val_indices(
+            subset_size, val_split, test_reserve=n_test, patient_ids=patient_ids, seed=seed,
+        )
     else:
         # Full run: NIH ChestX-ray14 only ships train/test, no train/val —
         # carve val out of the full train split ourselves. Loading it here
@@ -212,7 +288,9 @@ def get_dataloaders(
             "alkzar90/NIH-Chest-X-ray-dataset", "image-classification", split="train",
         ))
         n_test = None  # use the entire real test split, uncapped
-        train_indices, val_indices = _train_val_indices(full_train_len, val_split, test_reserve=0)
+        train_indices, val_indices = _train_val_indices(
+            full_train_len, val_split, test_reserve=0, patient_ids=patient_ids, seed=seed,
+        )
 
     train_ds = ChestXrayDataset(
         hf_split="train",

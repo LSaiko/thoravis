@@ -55,6 +55,9 @@ class ThoraVisTrainer:
     use_amp         : mixed-precision training (only takes effect on CUDA —
                        fp16 autocast + gradient scaling roughly halve ViT
                        step time there; CPU/MPS always run fp32)
+    early_stopping_patience : stop if val macro AUC hasn't improved for this
+                       many consecutive epochs (None = never stop early,
+                       always run all `epochs`)
     """
 
     def __init__(
@@ -69,11 +72,13 @@ class ThoraVisTrainer:
         seed: int = 42,
         use_amp: bool = True,
         num_workers: int = 2,
+        early_stopping_patience: Optional[int] = None,
     ):
         self.subset_size    = subset_size
         self.epochs         = epochs
         self.batch_size     = batch_size
         self.lr             = lr
+        self.early_stopping_patience = early_stopping_patience
         self.warmup_epochs  = warmup_epochs
         self.checkpoint_dir = checkpoint_dir
         self.seed           = seed
@@ -143,6 +148,7 @@ class ThoraVisTrainer:
             "val_auc_macro": [], "val_auc_per_class": [],
         }
         self.best_val_auc = 0.0
+        self.epochs_since_improvement = 0
 
     # ── Epoch routines ─────────────────────────────────────────────────────────
 
@@ -247,6 +253,7 @@ class ThoraVisTrainer:
             # Checkpoint
             if macro_auc > self.best_val_auc:
                 self.best_val_auc = macro_auc
+                self.epochs_since_improvement = 0
                 ckpt_path = os.path.join(self.checkpoint_dir, "best_thoravis.pt")
                 torch.save({
                     "epoch":       epoch + 1,
@@ -256,6 +263,7 @@ class ThoraVisTrainer:
                 }, ckpt_path)
                 ckpt_marker = " ✓ (saved)"
             else:
+                self.epochs_since_improvement += 1
                 ckpt_marker = ""
 
             elapsed = (time.time() - start) / 60
@@ -266,6 +274,14 @@ class ThoraVisTrainer:
                 f"val_AUC={macro_auc:.4f}"
                 f"{ckpt_marker}  [{elapsed:.1f}m]"
             )
+
+            if (self.early_stopping_patience is not None
+                    and self.epochs_since_improvement >= self.early_stopping_patience):
+                print(
+                    f"\nEarly stopping: val AUC hasn't improved for "
+                    f"{self.epochs_since_improvement} epochs (patience={self.early_stopping_patience})."
+                )
+                break
 
         print(f"\nTraining complete. Best Val AUC: {self.best_val_auc:.4f}")
         return self.history
@@ -297,6 +313,8 @@ def main():
     parser.add_argument("--seed",       type=int,   default=42)
     parser.add_argument("--no-amp",     action="store_true", help="disable mixed precision")
     parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--early-stopping-patience", type=int, default=None,
+                         help="stop if val AUC hasn't improved for N epochs (default: run all --epochs)")
     args = parser.parse_args()
 
     trainer = ThoraVisTrainer(
@@ -309,6 +327,7 @@ def main():
         seed=args.seed,
         use_amp=not args.no_amp,
         num_workers=args.num_workers,
+        early_stopping_patience=args.early_stopping_patience,
     )
     trainer.train()
     trainer.print_per_class_auc()
