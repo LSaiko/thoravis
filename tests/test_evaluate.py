@@ -97,6 +97,18 @@ class TestIsotonicCalibration(unittest.TestCase):
         self.assertEqual(calibrated.shape, probs.shape)
         self.assertTrue(np.all(calibrated >= 0.0) and np.all(calibrated <= 1.0))
 
+    def test_per_class_fits_one_curve_per_pathology(self):
+        rng = np.random.default_rng(4)
+        probs = rng.random((200, NUM_CLASSES))
+        labels = (rng.random((200, NUM_CLASSES)) < 0.5).astype(float)
+
+        calibrators = fit_isotonic_calibration(probs, labels, per_class=True)
+        self.assertEqual(len(calibrators), NUM_CLASSES)
+
+        calibrated = apply_calibration(calibrators, probs)
+        self.assertEqual(calibrated.shape, probs.shape)
+        self.assertTrue(np.all(calibrated >= 0.0) and np.all(calibrated <= 1.0))
+
 
 if __name__ == "__main__":
     unittest.main()

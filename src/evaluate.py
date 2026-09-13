@@ -331,10 +331,10 @@ def fit_temperature(
     return float(log_temperature.exp().item())
 
 
-def fit_isotonic_calibration(probs: np.ndarray, labels: np.ndarray):
+def fit_isotonic_calibration(probs: np.ndarray, labels: np.ndarray, per_class: bool = False):
     """
-    Fit a pooled isotonic regression mapping raw sigmoid probability to
-    calibrated probability.
+    Fit isotonic regression mapping raw sigmoid probability to calibrated
+    probability, pooled across all 15 pathologies by default.
 
     Temperature scaling (above) is a single global scalar — it can only
     correct miscalibration of the form sigmoid(logit / T), i.e. uniform
@@ -346,32 +346,58 @@ def fit_isotonic_calibration(probs: np.ndarray, labels: np.ndarray):
     that varies across the confidence range — verified on synthetic data
     matching this exact failure shape (tests/test_evaluate.py).
 
-    In practice, on this project's actual checkpoint, it didn't help:
-    fit on val and evaluated on the real held-out test set, it scored
-    *worse* than temperature scaling both overall (ECE 0.0171 vs 0.0034)
-    and in the 0.4-0.9 band specifically (0.1499 vs 0.0789) — see
-    results/calibration_comparison.txt (regenerate, gitignored). Most
+    In practice, on this project's actual checkpoint, pooled isotonic
+    didn't help: fit on val and evaluated on the real held-out test set,
+    it scored *worse* than temperature scaling both overall (ECE 0.0171
+    vs 0.0034) and in the 0.4-0.9 band specifically (0.1499 vs 0.0789) —
+    see results/calibration_comparison.txt (regenerate, gitignored). Most
     likely cause: pooling across 15 pathologies with different base rates
     and probably different miscalibration shapes gives isotonic regression
     enough freedom to fit validation-set sampling noise that doesn't
-    transfer to test. Temperature scaling remains the better real-world
-    choice here despite being the theoretically cruder tool — this
-    function is kept because it's a legitimate technique that could help
-    on a different checkpoint or a per-class fit, not because it won here.
+    transfer to test.
+
+    per_class=True fits a separate curve per pathology instead. Each curve
+    still sees the full validation set (~12.6k images) for that column —
+    isotonic regression fits on all points, not just positives, so this
+    isn't the small-sample regime it might look like. On this project's
+    real checkpoint it's the best calibration method tried: test-set ECE
+    0.0118 overall (temperature: 0.0112, pooled isotonic: 0.0275) and,
+    more importantly, 0.0627 in the 0.4-0.9 band that actually drives
+    decisions — a 2.6x improvement over temperature scaling's 0.1660 and
+    the pooled fit's 0.2019 there. See results/calibration_comparison.txt
+    (regenerate, gitignored) and the README's Calibration section. The
+    pooled fit's failure was averaging 15 pathologies' different
+    miscalibration shapes into one curve, not overfitting per se —
+    per-class removes exactly that averaging.
 
     Must be fit on a validation split, never on the split being reported —
     same rule as temperature scaling.
 
-    Returns a fitted sklearn IsotonicRegression; apply with
+    Returns a fitted sklearn IsotonicRegression (per_class=False) or a
+    list of NUM_CLASSES of them (per_class=True); apply with
     apply_calibration(calibrator, probs).
     """
     from sklearn.isotonic import IsotonicRegression
 
-    calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-    calibrator.fit(probs.ravel(), labels.ravel())
-    return calibrator
+    def _fit(p, y):
+        calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        calibrator.fit(p, y)
+        return calibrator
+
+    if per_class:
+        return [_fit(probs[:, i], labels[:, i]) for i in range(NUM_CLASSES)]
+    return _fit(probs.ravel(), labels.ravel())
 
 
 def apply_calibration(calibrator, probs: np.ndarray) -> np.ndarray:
-    """Apply a fitted isotonic calibrator (see fit_isotonic_calibration), preserving shape."""
+    """
+    Apply a fitted isotonic calibrator (see fit_isotonic_calibration),
+    preserving shape. Accepts either a single pooled calibrator or a
+    per-class list of them (one per pathology column).
+    """
+    if isinstance(calibrator, list):
+        return np.stack(
+            [calibrator[i].predict(probs[:, i]) for i in range(len(calibrator))],
+            axis=1,
+        )
     return calibrator.predict(probs.ravel()).reshape(probs.shape)

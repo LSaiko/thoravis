@@ -249,7 +249,7 @@ eager vs. traced output match before saving.
 python -m unittest discover -s tests -v
 ```
 
-55 tests, all offline against a tiny local ViT checkpoint instead of the full
+68 tests, all offline against a tiny local ViT checkpoint instead of the full
 ViT-B/16 or the real dataset — preprocessing shapes, the model forward pass,
 MC-dropout uncertainty, Grad-CAM (including a regression test for the
 second-to-last-layer fix below), TorchScript export, the API's endpoints
@@ -332,17 +332,23 @@ at the band.
 **Tried fixing that band specifically with isotonic regression**
 (`fit_isotonic_calibration()`) since a single temperature can't in
 principle correct miscalibration that varies across the confidence range.
-Verified it works on synthetic data shaped like this exact problem — then,
-on the real checkpoint, it made things *worse*: test-set ECE 0.0275 vs.
-temperature scaling's 0.0112 overall, 0.2019 vs. 0.1660 in the 0.4–0.9 band
-specifically (`results/calibration_comparison.txt`, regenerate,
-gitignored). Same finding as with the prior (index-split) checkpoint, now
-confirmed on a second, independently-trained model. Most likely cause:
-pooling across 15 pathologies with different base rates gives isotonic
-regression enough freedom to fit validation-set noise that doesn't
-transfer to test. Temperature scaling remains the better real-world choice
-here, despite being the theoretically cruder tool — worth knowing before
-reaching for the fancier method by default.
+Verified it works on synthetic data shaped like this exact problem — the
+first (pooled) attempt then made things *worse* on the real checkpoint:
+test-set ECE 0.0275 vs. temperature scaling's 0.0112 overall, 0.2019 vs.
+0.1660 in the 0.4–0.9 band specifically. Root cause: pooling all 15
+pathologies' logits into one curve averages together 15 different
+miscalibration shapes, which doesn't transfer to test.
+
+**Fitting a separate isotonic curve per pathology instead**
+(`fit_isotonic_calibration(..., per_class=True)`) fixes exactly that —
+each curve still sees the full ~12.6k-image validation set for its own
+column, so this isn't a small-sample problem despite some pathologies
+having few positives. Test-set result: ECE **0.0118** overall (on par
+with temperature scaling's 0.0112) and **0.0627** in the 0.4–0.9 band — a
+2.6x improvement over temperature scaling's 0.1660 there, and the best of
+every method tried (`results/calibration_comparison.txt`, regenerate,
+gitignored). **Per-class isotonic regression is now the recommended
+calibration method for this checkpoint's actionable confidence range.**
 
 ---
 
