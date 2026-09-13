@@ -54,10 +54,11 @@ class XRayPreprocessor:
         augment: bool = False,
     ):
         self.target_size  = target_size
-        self.clahe        = cv2.createCLAHE(
-            clipLimit=clahe_clip,
-            tileGridSize=(clahe_grid, clahe_grid)
-        )
+        # Store the CLAHE params, not a cv2.CLAHE object: it's a C++ handle
+        # that can't be pickled, and DataLoader must pickle this whole class
+        # to hand it to worker processes whenever num_workers > 0.
+        self.clahe_clip   = clahe_clip
+        self.clahe_grid   = clahe_grid
         self.bilateral_d  = bilateral_d
         self.bilateral_sc = bilateral_sc
         self.bilateral_ss = bilateral_ss
@@ -122,7 +123,11 @@ class XRayPreprocessor:
 
     def _clahe(self, img: np.ndarray) -> np.ndarray:
         """Apply CLAHE for local contrast normalisation."""
-        return self.clahe.apply(img)
+        clahe = cv2.createCLAHE(
+            clipLimit=self.clahe_clip,
+            tileGridSize=(self.clahe_grid, self.clahe_grid),
+        )
+        return clahe.apply(img)
 
     def _bilateral(self, img: np.ndarray) -> np.ndarray:
         """Edge-preserving noise reduction."""

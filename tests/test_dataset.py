@@ -11,7 +11,7 @@ import unittest
 
 import torch
 
-from src.dataset import ChestXrayDataset, NUM_CLASSES, set_global_seed
+from src.dataset import ChestXrayDataset, NUM_CLASSES, set_global_seed, _train_val_indices
 
 
 class _StubPreprocessor:
@@ -71,6 +71,24 @@ class TestChestXrayDatasetLabels(unittest.TestCase):
         expected = len(samples) / (counts.clamp(min=1) * NUM_CLASSES)
 
         self.assertTrue(torch.allclose(weights, expected))
+
+
+class TestTrainValIndices(unittest.TestCase):
+    def test_train_and_val_never_overlap_with_test_reserve(self):
+        train_idx, val_idx = _train_val_indices(1000, val_split=0.15, test_reserve=100)
+        self.assertEqual(set(train_idx) & set(val_idx), set())
+        self.assertEqual(len(val_idx), 150)
+        self.assertEqual(len(train_idx), 750)
+
+    def test_full_dataset_mode_still_splits_disjointly(self):
+        # Regression: get_dataloaders() used to fall through to
+        # indices=None for BOTH train and val when subset_size was None,
+        # making them the exact same, fully-overlapping dataset.
+        train_idx, val_idx = _train_val_indices(112_120, val_split=0.15, test_reserve=0)
+        self.assertEqual(set(train_idx) & set(val_idx), set())
+        self.assertGreater(len(train_idx), 0)
+        self.assertGreater(len(val_idx), 0)
+        self.assertEqual(len(train_idx) + len(val_idx), 112_120)
 
 
 class TestSetGlobalSeed(unittest.TestCase):

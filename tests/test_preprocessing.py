@@ -1,5 +1,6 @@
 """Shape/dtype contract tests for src/preprocessing.py."""
 
+import pickle
 import unittest
 
 import numpy as np
@@ -43,6 +44,16 @@ class TestXRayPreprocessor(unittest.TestCase):
         self.assertEqual(edges.dtype, np.uint8)
         self.assertGreaterEqual(int(edges.min()), 0)
         self.assertLessEqual(int(edges.max()), 255)
+
+    def test_picklable_for_dataloader_workers(self):
+        # DataLoader(num_workers>0) must pickle the whole Dataset — and thus
+        # this preprocessor — to hand it to worker processes. A raw
+        # cv2.CLAHE instance stored as state breaks that (regression: was
+        # stored directly in __init__, is now built on demand in _clahe()).
+        restored = pickle.loads(pickle.dumps(self.pre))
+        img = np.random.randint(0, 255, (128, 128), dtype=np.uint8)
+        tensor = restored.preprocess(img)
+        self.assertEqual(tuple(tensor.shape), (3, 224, 224))
 
 
 if __name__ == "__main__":

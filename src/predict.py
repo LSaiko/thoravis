@@ -6,15 +6,21 @@ pathology probabilities for one chest X-ray.
 
 CLI usage
 ---------
-    python src/predict.py --image path/to/xray.png --checkpoint models/best_thoravis.pt
+    python -m src.predict --image path/to/xray.png --checkpoint models/best_thoravis.pt
 """
 
 import argparse
 import os
+import sys
 from typing import Dict
 
 import torch
 from PIL import Image
+
+# See src/train.py for why: redirected/piped stdout on Windows falls back to
+# a non-UTF-8 codepage that can't render this project's box-drawing output.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from src.dataset import PATHOLOGY_LABELS
 from src.model import ThoraVisClassifier

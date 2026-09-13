@@ -3,19 +3,29 @@ thoravis/src/train.py
 ─────────────────────────────────────────────────────────────────────────────
 Training loop for ThoraVis with:
   - AdamW optimizer + cosine LR schedule with warmup
+  - Mixed-precision (AMP) training on CUDA
   - Per-epoch macro AUC-ROC tracking
   - Best-model checkpointing
   - Backbone warm-up strategy (freeze → unfreeze)
 
 CLI usage
 ---------
-    python src/train.py --subset 5000 --epochs 5 --batch_size 32 --lr 2e-5
+    python -m src.train --subset 5000 --epochs 5 --batch_size 32 --lr 2e-5
 """
 
 import argparse
 import os
+import sys
 import time
 import torch
+
+# Redirecting stdout (a log file, a pipe, a non-UTF-8 Windows console) makes
+# Python fall back to the platform's default encoding, which can't render
+# this file's box-drawing characters and crashes mid-run. Force UTF-8 output
+# unconditionally so a training run never dies on a print() after hours of
+# work.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
@@ -42,6 +52,9 @@ class ThoraVisTrainer:
     warmup_epochs   : epochs to freeze backbone (head-only training)
     checkpoint_dir  : where to save model weights
     device          : 'cuda' / 'mps' / 'cpu'
+    use_amp         : mixed-precision training (only takes effect on CUDA —
+                       fp16 autocast + gradient scaling roughly halve ViT
+                       step time there; CPU/MPS always run fp32)
     """
 
     def __init__(
@@ -54,6 +67,8 @@ class ThoraVisTrainer:
         checkpoint_dir: str = "models",
         device: Optional[str] = None,
         seed: int = 42,
+        use_amp: bool = True,
+        num_workers: int = 2,
     ):
         self.subset_size    = subset_size
         self.epochs         = epochs
@@ -79,12 +94,20 @@ class ThoraVisTrainer:
             self.device = torch.device("cpu")
         print(f"Device: {self.device}")
 
+        # AMP only helps (and is only well-supported) on CUDA; GradScaler is a
+        # documented no-op when enabled=False, so the epoch loops below don't
+        # need a separate fp32 code path.
+        self.use_amp = use_amp and self.device.type == "cuda"
+        self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.use_amp)
+        print(f"Mixed precision: {'on' if self.use_amp else 'off'}")
+
         # Data
         print("\n── Loading data ─────────────────────────────────────────────")
         self.train_loader, self.val_loader, self.test_loader = get_dataloaders(
             subset_size=subset_size,
             batch_size=batch_size,
             seed=seed,
+            num_workers=num_workers,
         )
 
         # Model (start with frozen backbone for warmup)
@@ -133,13 +156,18 @@ class ThoraVisTrainer:
             labels = labels.to(self.device)
 
             self.optimizer.zero_grad()
-            logits = self.model(images)
-            loss   = self.criterion(logits, labels)
-            loss.backward()
+            with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+                logits = self.model(images)
+                loss   = self.criterion(logits, labels)
 
-            # Gradient clipping for stability
+            self.scaler.scale(loss).backward()
+
+            # Gradient clipping for stability — must unscale first, since
+            # gradients are still in the scaler's fp16-safe scaled range.
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             total_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
@@ -158,22 +186,27 @@ class ThoraVisTrainer:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
 
-                logits = self.model(images)
-                loss   = self.criterion(logits, labels)
+                with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+                    logits = self.model(images)
+                    loss   = self.criterion(logits, labels)
                 total_loss += loss.item()
 
-                probs = torch.sigmoid(logits).cpu().numpy()
+                probs = torch.sigmoid(logits.float()).cpu().numpy()
                 all_probs.append(probs)
                 all_labels.append(labels.cpu().numpy())
 
         all_probs  = np.vstack(all_probs)     # (N, 14)
         all_labels = np.vstack(all_labels)    # (N, 14)
 
-        # Per-class AUC (skip classes with no positives)
+        # Per-class AUC — skip classes with no positives *or* no negatives;
+        # roc_auc_score is undefined (NaN) for either and would otherwise
+        # silently poison the macro average below.
+        n_samples = all_labels.shape[0]
         aucs = []
         auc_per_class = {}
         for i, label_name in enumerate(PATHOLOGY_LABELS):
-            if all_labels[:, i].sum() > 0:
+            n_pos = all_labels[:, i].sum()
+            if 0 < n_pos < n_samples:
                 auc = roc_auc_score(all_labels[:, i], all_probs[:, i])
                 aucs.append(auc)
                 auc_per_class[label_name] = round(auc, 4)
@@ -254,13 +287,16 @@ class ThoraVisTrainer:
 
 def main():
     parser = argparse.ArgumentParser(description="Train ThoraVis classifier")
-    parser.add_argument("--subset",     type=int,   default=5000)
+    parser.add_argument("--subset",     type=int,   default=None,
+                         help="cap dataset size (omit for the full ~112k dataset)")
     parser.add_argument("--epochs",     type=int,   default=5)
     parser.add_argument("--batch_size", type=int,   default=32)
     parser.add_argument("--lr",         type=float, default=2e-5)
     parser.add_argument("--warmup",     type=int,   default=1)
     parser.add_argument("--device",     type=str,   default=None)
     parser.add_argument("--seed",       type=int,   default=42)
+    parser.add_argument("--no-amp",     action="store_true", help="disable mixed precision")
+    parser.add_argument("--num_workers", type=int, default=2)
     args = parser.parse_args()
 
     trainer = ThoraVisTrainer(
@@ -271,6 +307,8 @@ def main():
         warmup_epochs=args.warmup,
         device=args.device,
         seed=args.seed,
+        use_amp=not args.no_amp,
+        num_workers=args.num_workers,
     )
     trainer.train()
     trainer.print_per_class_auc()

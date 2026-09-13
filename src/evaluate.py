@@ -6,6 +6,8 @@ Evaluation utilities for ThoraVis:
   - Precision / Recall / F1 at a given threshold
   - ROC curve plots
   - Confusion matrix grid
+  - Calibration: expected calibration error, reliability diagram,
+    temperature scaling
 """
 
 import numpy as np
@@ -51,6 +53,29 @@ def collect_predictions(
     return np.vstack(all_probs), np.vstack(all_labels)
 
 
+@torch.no_grad()
+def collect_logits(
+    model,
+    dataloader,
+    device: torch.device,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Like collect_predictions, but returns raw logits instead of sigmoid
+    probabilities — temperature scaling (below) must operate before the
+    sigmoid, not after.
+    """
+    model.eval()
+    all_logits, all_labels = [], []
+
+    for images, labels in tqdm(dataloader, desc="Collecting logits"):
+        images = images.to(device)
+        logits = model(images)
+        all_logits.append(logits.cpu().numpy())
+        all_labels.append(labels.numpy())
+
+    return np.vstack(all_logits), np.vstack(all_labels)
+
+
 # ─── AUC-ROC ──────────────────────────────────────────────────────────────────
 
 def compute_auc_table(
@@ -58,13 +83,16 @@ def compute_auc_table(
     labels: np.ndarray,
 ) -> Dict[str, float]:
     """
-    Compute per-class AUC-ROC, skipping classes with no positive examples.
+    Compute per-class AUC-ROC, skipping classes with no positive *or* no
+    negative examples (roc_auc_score is undefined — NaN — for either).
 
     Returns dict: {pathology_label: auc_value}
     """
+    n_samples = labels.shape[0]
     results = {}
     for i, label in enumerate(PATHOLOGY_LABELS):
-        if labels[:, i].sum() == 0:
+        n_pos = labels[:, i].sum()
+        if n_pos == 0 or n_pos == n_samples:
             continue
         auc = roc_auc_score(labels[:, i], probs[:, i])
         results[label] = round(auc, 4)
@@ -186,3 +214,111 @@ def plot_training_history(history: dict, save_path: Optional[str] = None):
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Training history plot saved → {save_path}")
     plt.show()
+
+
+# ─── Calibration ──────────────────────────────────────────────────────────────
+#
+# Sigmoid outputs are not automatically calibrated probabilities — a model
+# can be discriminative (good AUC) while still being systematically over- or
+# under-confident. These treat each of the 15 per-pathology sigmoid outputs
+# as an independent binary probability estimate (there's no single joint
+# distribution to calibrate in a multi-label setting), which is the standard
+# simplification for this kind of pooled calibration check.
+
+def expected_calibration_error(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """
+    Pooled expected calibration error (ECE) across every (sample, class)
+    prediction: bins predictions by confidence, then weights each bin's
+    |accuracy − confidence| gap by how much of the data fell in it.
+    0 = perfectly calibrated.
+    """
+    probs_flat  = probs.ravel()
+    labels_flat = labels.ravel()
+    n = len(probs_flat)
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+        in_bin = (probs_flat >= lo) & (probs_flat <= hi if hi == 1.0 else probs_flat < hi)
+        if not in_bin.any():
+            continue
+        bin_confidence = probs_flat[in_bin].mean()
+        bin_accuracy   = labels_flat[in_bin].mean()
+        ece += (in_bin.sum() / n) * abs(bin_accuracy - bin_confidence)
+
+    return float(ece)
+
+
+def plot_reliability_diagram(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    n_bins: int = 10,
+    save_path: Optional[str] = None,
+):
+    """Plot observed frequency vs. mean predicted probability per bin."""
+    probs_flat  = probs.ravel()
+    labels_flat = labels.ravel()
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_confidences, bin_accuracies = [], []
+    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+        in_bin = (probs_flat >= lo) & (probs_flat <= hi if hi == 1.0 else probs_flat < hi)
+        if not in_bin.any():
+            continue
+        bin_confidences.append(probs_flat[in_bin].mean())
+        bin_accuracies.append(labels_flat[in_bin].mean())
+
+    ece = expected_calibration_error(probs, labels, n_bins=n_bins)
+
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    ax.plot([0, 1], [0, 1], "k--", linewidth=0.8, alpha=0.6, label="Perfect calibration")
+    ax.plot(bin_confidences, bin_accuracies, "o-", color="#E87040",
+             label=f"ThoraVis (ECE = {ece:.4f})")
+    ax.set_xlabel("Mean predicted probability")
+    ax.set_ylabel("Observed frequency")
+    ax.set_title("ThoraVis — Reliability Diagram")
+    ax.set_xlim([0, 1])
+    ax.set_ylim([0, 1])
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Reliability diagram saved → {save_path}")
+    plt.show()
+
+
+def fit_temperature(
+    logits: np.ndarray,
+    labels: np.ndarray,
+    max_iter: int = 50,
+) -> float:
+    """
+    Fit a single scalar temperature T (Guo et al., 2017) on held-out
+    logits/labels — apply downstream as sigmoid(logits / T). T > 1 means the
+    raw model was overconfident; T < 1 means underconfident. Must be fit on
+    a validation split, never on training data or the split being reported.
+    """
+    logits_t = torch.from_numpy(logits).float()
+    labels_t = torch.from_numpy(labels).float()
+
+    # Optimize in log-space so T = exp(log_T) stays positive by construction.
+    log_temperature = torch.zeros(1, requires_grad=True)
+    optimizer = torch.optim.LBFGS([log_temperature], lr=0.05, max_iter=max_iter)
+
+    def closure():
+        optimizer.zero_grad()
+        temperature = log_temperature.exp()
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            logits_t / temperature, labels_t
+        )
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return float(log_temperature.exp().item())

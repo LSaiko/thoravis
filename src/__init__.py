@@ -3,7 +3,10 @@ from src.model import ThoraVisClassifier, WeightedBCELoss
 from src.preprocessing import XRayPreprocessor, overlay_heatmap
 from src.train import ThoraVisTrainer
 from src.predict import load_model, predict_image
-from src.evaluate import collect_predictions, compute_auc_table, print_auc_table
+from src.evaluate import (
+    collect_predictions, collect_logits, compute_auc_table, print_auc_table,
+    expected_calibration_error, plot_reliability_diagram, fit_temperature,
+)
 from src.gradcam import GradCAMViT
 
 __version__ = "1.0.0"

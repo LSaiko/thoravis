@@ -29,6 +29,7 @@ data/
 # Results (generated at runtime)
 results/*.png
 results/*.csv
+results/*.txt
 !results/.gitkeep
 
 # IDE

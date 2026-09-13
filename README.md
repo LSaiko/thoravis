@@ -56,6 +56,8 @@ thoravis/
 │   ├── test_preprocessing.py
 │   ├── test_model.py
 │   ├── test_predict.py
+│   ├── test_train.py
+│   ├── test_evaluate.py
 │   └── test_dataset.py
 ├── models/
 │   └── .gitkeep
@@ -140,16 +142,19 @@ This single notebook walks through the complete pipeline end-to-end, including:
 
 ```bash
 # Quick demo run on 5,000 images
-python src/train.py --subset 5000 --epochs 5 --batch_size 32
+python -m src.train --subset 5000 --epochs 5 --batch_size 32
 
 # Full dataset run
-python src/train.py --epochs 20 --batch_size 64 --lr 2e-5
+python -m src.train --epochs 20 --batch_size 64 --lr 2e-5
+
+# Disable mixed precision (on by default when a CUDA GPU is available)
+python -m src.train --epochs 20 --batch_size 64 --no-amp
 ```
 
 ### 4. Run Inference on a Single Image
 
 ```bash
-python src/predict.py --image path/to/xray.png --checkpoint models/best_thoravis.pt
+python -m src.predict --image path/to/xray.png --checkpoint models/best_thoravis.pt
 ```
 
 Prints a sigmoid probability for each of the 15 pathology labels, marking the
@@ -167,18 +172,67 @@ in `ChestXrayDataset` — no GPU or full dataset download required.
 
 ---
 
-## 📊 Results (Subset: 5,000 images, 5 epochs)
+## 📊 Results (Full dataset: ~73.5k train / ~13k val, 20 epochs)
 
-> *Full dataset results pending — these are reproducible demo benchmarks*
+First full run of the pipeline end to end — `python -m src.train --epochs 20
+--batch_size 64 --lr 2e-5`, ~4.7h on a single RTX 5060. Val AUC peaks early
+and then degrades as the unfrozen ViT backbone overfits; the checkpointing
+logic already keeps the best epoch rather than the last one.
 
-| Pathology | AUC-ROC |
+| Pathology | AUC-ROC (epoch 7, best checkpoint) |
 |---|---|
-| Cardiomegaly | 0.87 |
-| Effusion | 0.83 |
-| Atelectasis | 0.81 |
-| Pneumothorax | 0.79 |
-| Consolidation | 0.77 |
-| **Macro Average** | **0.78** |
+| Edema | 0.890 |
+| Hernia | 0.888 |
+| Effusion | 0.881 |
+| Cardiomegaly | 0.869 |
+| Pneumothorax | 0.839 |
+| Mass | 0.823 |
+| Emphysema | 0.821 |
+| Atelectasis | 0.799 |
+| Consolidation | 0.789 |
+| Pleural_Thickening | 0.777 |
+| No Finding | 0.730 |
+| Pneumonia | 0.723 |
+| Fibrosis | 0.696 |
+| Nodule | 0.696 |
+| Infiltration | 0.582 |
+| **Macro Average** | **0.787** |
+
+- Best checkpoint: `models/best_thoravis.pt`, epoch 7/20, val macro AUC **0.7867** (not committed — see `.gitignore`; regenerate with the command above).
+- By epoch 20, train loss keeps falling (0.286 → 0.139) while val loss climbs back up (0.243 → 0.255) and macro AUC drifts down to 0.749 — the model is memorizing past epoch ~7. Worth an early-stopping callback rather than a fixed 20 epochs.
+- `Infiltration` and `Nodule` are the weakest classes — consistent with them being genuinely hard, diffuse, low-prevalence findings in ChestX-ray14, not obviously a pipeline bug.
+- Full per-epoch history and this table's provenance: `results/run_summary.txt` (regenerate, gitignored).
+
+---
+
+## 🎯 Calibration
+
+A high AUC only says the model *ranks* positives above negatives — it says
+nothing about whether `sigmoid(logits)` is a trustworthy probability. Before
+treating any output as "70% chance of Effusion", check:
+
+```python
+from src.evaluate import collect_logits, fit_temperature, plot_reliability_diagram
+import torch
+
+logits, labels = collect_logits(model, val_loader, device)
+plot_reliability_diagram(torch.sigmoid(torch.tensor(logits)).numpy(), labels,
+                          save_path="results/reliability_diagram.png")
+
+# Fit on a validation split, then apply sigmoid(logits / T) at inference time
+temperature = fit_temperature(logits, labels)
+```
+
+`expected_calibration_error()` reports a single pooled ECE number if you just
+need a scalar rather than the plot.
+
+**On the best checkpoint above:** pooled ECE is a deceptively good **0.019**
+— but that's dominated by the large mass of easy, correctly-low-confidence
+negatives across 15 labels. The reliability diagram tells the real story:
+predictions in the 0.4–0.9 range (the ones that'd actually drive a decision)
+are consistently overconfident — e.g. ~0.83 predicted maps to only ~0.36
+observed frequency. Fitted temperature is a mild `T ≈ 1.07`. Don't trust the
+single ECE number alone; look at the curve.
 
 ---
 

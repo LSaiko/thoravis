@@ -147,6 +147,25 @@ def _worker_init_fn(worker_id: int) -> None:
     random.seed(seed)
 
 
+def _train_val_indices(
+    total: int,
+    val_split: float,
+    test_reserve: int = 0,
+) -> Tuple[List[int], List[int]]:
+    """
+    Disjoint (train_indices, val_indices) covering a pool of `total` items,
+    reserving `test_reserve` items off the top for a demo-mode test slice
+    (0 when the real held-out test split is used instead, as in full
+    dataset mode). Always returns non-overlapping ranges — regression guard
+    for a past bug where a `None` total silently made train == val.
+    """
+    n_val   = int(total * val_split)
+    n_train = total - n_val - test_reserve
+    train_indices = list(range(0, n_train))
+    val_indices   = list(range(n_train, n_train + n_val))
+    return train_indices, val_indices
+
+
 # ─── DataLoader factory ───────────────────────────────────────────────────────
 
 def get_dataloaders(
@@ -175,26 +194,25 @@ def get_dataloaders(
     """
     set_global_seed(seed)
 
-    total = subset_size
-
-    # Split sizes
-    if total:
-        n_test  = int(total * test_split)
-        n_val   = int(total * val_split)
-        n_train = total - n_val - n_test
-    else:
-        # Use HuggingFace's built-in train/test if full dataset
-        n_train, n_val, n_test = None, None, None
-
     train_preprocessor = XRayPreprocessor(augment=True)
     val_preprocessor   = XRayPreprocessor(augment=False)
 
-    if n_train is not None:
-        train_indices = list(range(0, n_train))
-        val_indices   = list(range(n_train, n_train + n_val))
+    if subset_size is not None:
+        # Demo mode: carve a small train/val/test triple out of subset_size,
+        # sampling n_test from the *real* held-out test split (not from the
+        # train pool) so it stays a genuine out-of-sample check.
+        n_test = int(subset_size * test_split)
+        train_indices, val_indices = _train_val_indices(subset_size, val_split, test_reserve=n_test)
     else:
-        train_indices = None
-        val_indices   = None
+        # Full run: NIH ChestX-ray14 only ships train/test, no train/val —
+        # carve val out of the full train split ourselves. Loading it here
+        # just to read its length is cheap once cached (Arrow-backed, no
+        # re-download); train_ds below reuses the same cache.
+        full_train_len = len(load_dataset(
+            "alkzar90/NIH-Chest-X-ray-dataset", "image-classification", split="train",
+        ))
+        n_test = None  # use the entire real test split, uncapped
+        train_indices, val_indices = _train_val_indices(full_train_len, val_split, test_reserve=0)
 
     train_ds = ChestXrayDataset(
         hf_split="train",
